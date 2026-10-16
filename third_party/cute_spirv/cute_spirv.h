@@ -856,6 +856,7 @@ typedef enum cspv_stmt_kind
 	CSPV_S_SWITCH,
 	CSPV_S_RETURN,
 	CSPV_S_DISCARD,
+	CSPV_S_DEMOTE,    // demote; (GL_EXT_demote_to_helper_invocation)
 	CSPV_S_BREAK,
 	CSPV_S_CONTINUE,
 	CSPV_S_BLOCK,
@@ -1062,6 +1063,7 @@ typedef struct cspv_ctx
 	uint32_t frag_depth_var; // Nonzero once the shader references gl_FragDepth.
 	uint32_t front_facing_var; // Nonzero once the shader reads gl_FrontFacing.
 	uint32_t sample_id_var; // Nonzero once the shader reads gl_SampleID (which shades per sample).
+	bool uses_demote; // Needs SPV_EXT_demote_to_helper_invocation.
 	const char* es_unsupported; // The first function used that GLSL ES 3.00 lacks, and its line.
 	int es_unsupported_line;
 
@@ -2501,6 +2503,7 @@ typedef struct cspv_keywords
 	const char* kw_default;
 	const char* kw_return;
 	const char* kw_discard;
+	const char* kw_demote;
 	const char* kw_break;
 	const char* kw_continue;
 	const char* kw_true;
@@ -2562,6 +2565,7 @@ static void cspv_init_keywords(void)
 	g_cspv_kw.kw_default = sintern("default");
 	g_cspv_kw.kw_return = sintern("return");
 	g_cspv_kw.kw_discard = sintern("discard");
+	g_cspv_kw.kw_demote = sintern("demote");
 	g_cspv_kw.kw_break = sintern("break");
 	g_cspv_kw.kw_continue = sintern("continue");
 	g_cspv_kw.kw_true = sintern("true");
@@ -3098,6 +3102,17 @@ static cspv_stmt* cspv_parse_stmt(cspv_ctx* ctx)
 	if (cspv_accept_ident(ctx, g_cspv_kw.kw_discard)) {
 		cspv_expect_punct(ctx, ';');
 		return cspv_new_stmt(ctx, CSPV_S_DISCARD, line);
+	}
+
+	// `demote;` is a statement only when ';' follows, so a variable named demote still works.
+	if (cspv_is_ident(ctx, g_cspv_kw.kw_demote)) {
+		const char* q = ctx->p;
+		while (*q == ' ' || *q == '\t' || *q == '\r' || *q == '\n') q++;
+		if (*q == ';') {
+			cspv_advance(ctx);
+			cspv_expect_punct(ctx, ';');
+			return cspv_new_stmt(ctx, CSPV_S_DEMOTE, line);
+		}
 	}
 
 	if (cspv_accept_ident(ctx, g_cspv_kw.kw_break)) {
@@ -5252,6 +5267,18 @@ static void cspv_gen_stmt(cspv_ctx* ctx, cspv_stmt* s)
 		if (ctx->stage != CSPV_STAGE_FRAGMENT) cspv_errorf(ctx, s->line, "discard is only valid in fragment shaders");
 		cspv_emit(&ctx->body, CSpvOpKill, NULL, 0);
 		ctx->block_terminated = true;
+		break;
+
+	case CSPV_S_DEMOTE:
+		// The invocation becomes a helper: its outputs and stores are dropped, but it
+		// keeps running, so derivatives in its quad stay defined. Not a terminator.
+		if (ctx->stage != CSPV_STAGE_FRAGMENT) cspv_errorf(ctx, s->line, "demote is only valid in fragment shaders");
+		cspv_emit(&ctx->body, 5380 /* OpDemoteToHelperInvocation */, NULL, 0);
+		ctx->uses_demote = true;
+		if (!ctx->es_unsupported) {
+			ctx->es_unsupported = "demote";
+			ctx->es_unsupported_line = s->line;
+		}
 		break;
 
 	case CSPV_S_BREAK:
@@ -7548,6 +7575,13 @@ static void cspv_tp_stmt(cspv_tp* g, cspv_stmt* s)
 		break;
 
 	case CSPV_S_DISCARD:
+		cspv_tp_indent(g);
+		sappend(g->ctx->tp_out, g->msl ? "discard_fragment();\n" : "discard;\n");
+		break;
+
+	case CSPV_S_DEMOTE:
+		// HLSL's discard, and MSL's discard_fragment() from Metal 2.3 on, already demote:
+		// the invocation keeps running for its quad's derivatives.
 		cspv_tp_indent(g);
 		sappend(g->ctx->tp_out, g->msl ? "discard_fragment();\n" : "discard;\n");
 		break;
@@ -12099,7 +12133,7 @@ static bool cspv_wg_stmt_discards(cspv_stmt* s)
 {
 	if (!s) return false;
 	switch (s->kind) {
-	case CSPV_S_DISCARD: return true;
+	case CSPV_S_DISCARD: case CSPV_S_DEMOTE: return true;
 	case CSPV_S_BLOCK:
 		for (int i = 0; i < (int)asize(s->u.block); i++) {
 			if (cspv_wg_stmt_discards(s->u.block[i])) return true;
@@ -12809,6 +12843,7 @@ static void cspv_wg_stmt(cspv_wg* g, cspv_stmt* s)
 		break;
 
 	case CSPV_S_DISCARD:
+	case CSPV_S_DEMOTE: // WGSL's discard demotes.
 		cspv_wg_indent(g);
 		sappend(*out, "discard;\n");
 		break;
@@ -13557,6 +13592,8 @@ static uint32_t* cspv_assemble(cspv_ctx* ctx, size_t* out_word_count)
 	if (ctx->needs_image_query) cspv_emit1(&mod, CSpvOpCapability, 50); // ImageQuery
 	if (ctx->sample_id_var) cspv_emit1(&mod, CSpvOpCapability, 35); // SampleRateShading
 	if (ctx->needs_extended_formats) cspv_emit1(&mod, CSpvOpCapability, 49); // StorageImageExtendedFormats
+	if (ctx->uses_demote) cspv_emit1(&mod, CSpvOpCapability, 5379); // DemoteToHelperInvocation
+	if (ctx->uses_demote) cspv_emit_str(&mod, 10 /* OpExtension */, NULL, 0, "SPV_EXT_demote_to_helper_invocation");
 
 	// OpExtInstImport %glsl "GLSL.std.450".
 	cspv_emit_str(&mod, CSpvOpExtInstImport, &ctx->glsl_ext_id, 1, "GLSL.std.450");

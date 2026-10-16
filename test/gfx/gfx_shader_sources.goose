@@ -58,4 +58,14 @@ fn main() {
         """);
     describe("compute", comp);
     print("local size ", comp[8], " x ", comp[12], " x ", comp[16]);
+
+    // `demote;` is a statement, and demote followed by anything else a name.
+    describe("demote", embed_shader("frag", """
+        layout(location = 0) out vec4 result;
+        void main() {
+            float demote = 0.5;
+            if (gl_FragCoord.x < 1.0) demote;
+            result = vec4(demote);
+        }
+        """));
 }
