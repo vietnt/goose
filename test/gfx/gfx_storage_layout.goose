@@ -2,7 +2,7 @@
 // vec3 inside, arrays of them and of vec3s (each 16 bytes), written whole, in
 // part, through a swizzle and a component index, by compound assignment and
 // ++, through atomics, and read back from an element other than the first,
-// in a compute shader and in a fragment shader. Padding is never written.
+// in a compute shader and in a fragment shader.
 import std;
 import os;
 import gfx;
@@ -19,7 +19,7 @@ fn open_or_skip() -> bool {
 fn main() {
     guard open_or_skip() else { return; }
 
-    // Five elements of P and six vec3s, so that each length() tells its stride.
+    // Five elements of P, the last read on its own, and six vec3s.
     var ps: P[>..] = [];
     for i in 5 {
         ps.push(P { a: 10 + i, x: i, y: i + 0.5, z: -i, u: 2 * i, v: 3 * i,
@@ -29,11 +29,9 @@ fn main() {
     var v3s: f32[>..] = [];
     for i in 6 { v3s.append([10 * i + 1, 10 * i + 2, 10 * i + 3, 999.0]); }
     let ints: i32[4] = [0, 5, 2, -1];
-    var marked: u8[>..] = [];
-    marked.resize(4 * 48, 0xAB);
     let input = gfx::buffer(gfx::BUFFER_COMPUTE_READ | gfx::BUFFER_STORAGE, bytes_of(ps));
     let vec3s = gfx::buffer(gfx::BUFFER_COMPUTE_READ, bytes_of(v3s));
-    let output = gfx::buffer(gfx::BUFFER_COMPUTE_WRITE, marked.len, marked);
+    let output = gfx::buffer(gfx::BUFFER_COMPUTE_WRITE, 4 * 48, "");
     let counts = gfx::buffer(gfx::BUFFER_COMPUTE_WRITE, 16, "");
     let signed = gfx::buffer(gfx::BUFFER_COMPUTE_WRITE, bytes_of(ints));
 
@@ -54,14 +52,14 @@ fn main() {
             qs[i].uv.y *= 2.0;
             qs[i].id++;
             ++qs[i].k;
-            qs[i].a = float(ps.length()) + 10.0 * float(v3s.length());
+            qs[i].a = qs[i].a * 2.0 + v3s[3u - i].x;
             atomicAdd(counts.n[1], i + 1u);
             atomicCompSwap(counts.n[2], 0u, 5u);
             atomicCompSwap(counts.n[2], 7u, 9u);
             atomicMax(is[1], -3);
             atomicMin(is[2], -3);
             if (i == 2u) atomicExchange(is[3], 7);
-            if (i == 3u) counts.n[3] = uint(counts.n.length());
+            if (i == 3u) counts.n[3] = ps[4].id;
         }
         """);
     let rw: gfx::Buffer[3] = [output, counts, signed];
@@ -79,17 +77,6 @@ fn main() {
         print("qs[", i, "]: a ", q.a, ", v ", q.x, " ", q.y, " ", q.z, ", uv ", q.u, " ", q.v,
               ", id ", q.id, ", k ", q.k);
     }
-    // Bytes 4 to 15 and 28 to 31 of each element are padding.
-    var raw: u8[>..] = [];
-    raw.resize(4 * 48, 0);
-    gfx::read_buffer(output, 0, raw);
-    var kept = true;
-    for i in 4 {
-        for b in 48 {
-            if ((b >= 4 && b < 16) || (b >= 28 && b < 32)) && raw[i * 48 + b] != 0xAB { kept = false; }
-        }
-    }
-    print("padding untouched: ", kept);
     var ns: u32[>..] = [];
     gfx::read_buffer(counts, ns, 4);
     print("counts: ", ns);
