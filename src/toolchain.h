@@ -197,11 +197,29 @@ inline string VsInstallDir() {
     return found;
 }
 
+// Calls f(name, value) for each variable of `set` output, skipping cmd's
+// hidden ones, which start with "=" and are not for a child.
+template<typename F> void ForEachSetLine(const string &env, F f) {
+    for (size_t i = 0; i < env.size();) {
+        auto end = env.find('\n', i);
+        if (end == string::npos) end = env.size();
+        auto line = env.substr(i, end - i);
+        i = end + 1;
+        while (!line.empty() && line.back() == '\r') line.pop_back();
+        auto eq = line.find('=');
+        if (eq == string::npos || eq == 0) continue;
+        f(line.substr(0, eq), line.substr(eq + 1));
+    }
+}
+
 // Imports the environment vcvars64.bat sets up (PATH, INCLUDE, LIB, ...)
 // into this process, so that cl and link work from here on. Running the
-// batch file costs a second or two, so what it printed is kept under
+// batch file costs a second or two, so what it changed is kept under
 // GOOSE_HOME against the file's path and modification time; `refresh`
-// ignores that. False when there is no Visual Studio with a C++ toolset.
+// ignores that. Only what it changed: the rest is this process's own
+// environment at the time, which a later run must not get back (an
+// SDL_GPU_DRIVER set for one run, say). False when there is no Visual
+// Studio with a C++ toolset.
 inline bool ImportVcvars(bool refresh) {
     auto vs = VsInstallDir();
     if (vs.empty()) return false;
@@ -209,7 +227,7 @@ inline bool ImportVcvars(bool refresh) {
     if (!PathExists(vcvars)) return false;
     std::error_code ec;
     auto mtime = filesystem::last_write_time(filesystem::path(vcvars), ec).time_since_epoch().count();
-    auto header = cat("# ", vcvars, " ", (long long)mtime, "\n");
+    auto header = cat("# v2 ", vcvars, " ", (long long)mtime, "\n");
     auto cachedir = cat(GooseHome(), "/toolchain");
     auto cachefile = cat(cachedir, "/vcvars64-", Hex8(vcvars), ".env");
     string env;
@@ -223,21 +241,15 @@ inline bool ImportVcvars(bool refresh) {
             return false;
         auto r = RunProcess({ "cmd.exe", "/c", bat });
         if (!r.started || r.code != 0) return false;
-        env = r.output;
+        env.clear();
+        ForEachSetLine(r.output, [&](const string &name, const string &value) {
+            auto now = getenv(name.c_str());
+            if (!now || value != now) env += cat(name, "=", value, "\n");
+        });
         WriteFileMakingDirs(cachefile, cat(header, env));
     }
     InheritedPath();   // Taken before the PATH below replaces it.
-    for (size_t i = 0; i < env.size();) {
-        auto end = env.find('\n', i);
-        if (end == string::npos) end = env.size();
-        auto line = env.substr(i, end - i);
-        i = end + 1;
-        while (!line.empty() && line.back() == '\r') line.pop_back();
-        auto eq = line.find('=');
-        // cmd's hidden variables start with "=" and are not for a child.
-        if (eq == string::npos || eq == 0) continue;
-        SetEnvVar(line.substr(0, eq), line.substr(eq + 1));
-    }
+    ForEachSetLine(env, [](const string &name, const string &value) { SetEnvVar(name, value); });
     return true;
 }
 
