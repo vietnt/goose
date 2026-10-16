@@ -71,6 +71,11 @@ go to cute_framework, and each with a fixture in `test/gfx/`:
   element cannot be an `out` or `inout` argument; each is a compile error
   naming HLSL. Structs no longer carry padding fields in HLSL
   (`gfx_storage_layout`).
+* `atomicCompSwap` in MSL, which printed as itself and failed in Metal's
+  compiler: `cf_cas`, emitted only when a shader uses it, retries
+  `atomic_compare_exchange_weak_explicit` while it fails spuriously (GLSL's
+  is strong, Metal's weak) and returns the value found
+  (`gfx_storage_layout`).
 
 To update, copy both files from a newer cute_framework commit, record that
 commit here, and apply the local changes above that it does not have.
