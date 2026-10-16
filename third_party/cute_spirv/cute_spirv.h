@@ -3956,7 +3956,7 @@ typedef enum cspv_intrin_kind
 	CSPV_INTRIN_EXT_RET_F,  // GLSL.std.450, result is scalar float (length, distance).
 	CSPV_INTRIN_CORE_UNARY, // Core opcode, one operand, result = operand type (fwidth, dFdx...).
 	CSPV_INTRIN_DOT,
-	CSPV_INTRIN_TEXTURE,        // texture(sampler, uv)
+	CSPV_INTRIN_TEXTURE,        // texture(sampler, uv[, bias])
 	CSPV_INTRIN_TEXTURE_OFFSET, // textureOffset(sampler, uv, const ivec2)
 	CSPV_INTRIN_TEXTURE_LOD,  // textureLod(sampler, uv, lod)
 	CSPV_INTRIN_TEXTURE_GRAD, // textureGrad(sampler, uv, dPdx, dPdy)
@@ -4055,7 +4055,7 @@ static void cspv_init_intrins(void)
 	cspv_add_intrin("dFdx", CSPV_INTRIN_CORE_UNARY, CSpvOpDPdx, 1);
 	cspv_add_intrin("dFdy", CSPV_INTRIN_CORE_UNARY, CSpvOpDPdy, 1);
 	cspv_add_intrin("fwidth", CSPV_INTRIN_CORE_UNARY, CSpvOpFwidth, 1);
-	cspv_add_intrin("texture", CSPV_INTRIN_TEXTURE, 0, 2);
+	cspv_add_intrin("texture", CSPV_INTRIN_TEXTURE, 0, -2);
 	cspv_add_intrin("textureOffset", CSPV_INTRIN_TEXTURE_OFFSET, 0, 3);
 	cspv_add_intrin("textureLod", CSPV_INTRIN_TEXTURE_LOD, 0, 3);
 	cspv_add_intrin("textureGrad", CSPV_INTRIN_TEXTURE_GRAD, 0, 4);
@@ -4218,6 +4218,24 @@ static cspv_value cspv_gen_intrin(cspv_ctx* ctx, cspv_expr* e, cspv_intrin* in)
 				ctx->es_unsupported_line = e->line;
 			}
 			return cspv_rvalue(ctx->t_vec[0], result);
+		}
+
+		if (in->kind == CSPV_INTRIN_TEXTURE && asize(e->u.call.args) == 3) {
+			// texture(sampler, P, bias): the implicit level of detail plus bias, which
+			// needs implicit derivatives, so fragment shaders only. Comparison fetches are
+			// level zero on every backend, so the shadow dims take no bias.
+			if (ctx->stage != CSPV_STAGE_FRAGMENT) {
+				cspv_errorf(ctx, e->line, "texture() with a bias is only available in fragment shaders");
+			}
+			if (shadow) {
+				cspv_errorf(ctx, e->line, "texture() with a bias is not supported with %s (comparison fetches are level-zero on every backend)", cspv_type_name(st));
+			}
+			uint32_t coord = cspv_gen_rvalue_as(ctx, e->u.call.args[1], coord_t);
+			uint32_t bias = cspv_gen_rvalue_as(ctx, e->u.call.args[2], ctx->t_float);
+			uint32_t result = cspv_new_id(ctx);
+			uint32_t w[6] = { cspv_type_id(ctx, vec4_t), result, sampler, coord, 0x1 /* Bias */, bias };
+			cspv_emit(&ctx->body, CSpvOpImageSampleImplicitLod, w, 6);
+			return cspv_rvalue(vec4_t, result);
 		}
 
 		if (in->kind == CSPV_INTRIN_TEXTURE) {
@@ -8472,6 +8490,14 @@ static void cspv_hlsl_call(cspv_tp* g, cspv_expr* e)
 			spush(*out, ')');
 			return;
 		}
+		if (!strcmp(name, "texture") && argc == 3) {
+			sfmt_append(*out, "%s_tex.SampleBias(%s_smp, ", s, s);
+			cspv_tp_expr(g, args[1], 2);
+			sappend(*out, ", ");
+			cspv_tp_expr(g, args[2], 2);
+			spush(*out, ')');
+			return;
+		}
 		if (!strcmp(name, "texture")) {
 			if (no_gradients) sfmt_append(*out, "%s_tex.SampleLevel(%s_smp, ", s, s);
 			else sfmt_append(*out, "%s_tex.Sample(%s_smp, ", s, s);
@@ -9339,6 +9365,10 @@ static void cspv_msl_call(cspv_tp* g, cspv_expr* e)
 				sappend(*out, ", ");
 				cspv_tp_expr(g, args[3], 2);
 				spush(*out, ')');
+			} else if (argc == 3) {
+				sappend(*out, ", bias(");
+				cspv_tp_expr(g, args[2], 2);
+				spush(*out, ')');
 			} else if (no_gradients) {
 				sappend(*out, ", level(0)");
 			}
@@ -9348,6 +9378,11 @@ static void cspv_msl_call(cspv_tp* g, cspv_expr* e)
 		if (!strcmp(name, "texture")) {
 			sfmt_append(*out, "%s_tex.sample(%s_smp, ", s, s);
 			cspv_tp_expr(g, args[1], 2);
+			if (argc == 3) {
+				sappend(*out, ", bias(");
+				cspv_tp_expr(g, args[2], 2);
+				spush(*out, ')');
+			}
 			if (no_gradients) sappend(*out, ", level(0)");
 			spush(*out, ')');
 			return;
@@ -11370,8 +11405,9 @@ static void cspv_wg_texture(cspv_wg* g, cspv_expr* e)
 		bool lod = !strcmp(name, "textureLod");
 		bool grad = !strcmp(name, "textureGrad");
 		bool offset = !strcmp(name, "textureOffset");
+		bool bias = !strcmp(name, "texture") && asize(args) == 3;
 		bool level0 = !frag && !lod && !grad; // No derivatives outside fragment shaders.
-		sfmt_append(*out, "%s(%s, %s, ", grad ? "textureSampleGrad" : (lod || level0) ? "textureSampleLevel" : "textureSample", tex, smp);
+		sfmt_append(*out, "%s(%s, %s, ", grad ? "textureSampleGrad" : (lod || level0) ? "textureSampleLevel" : bias ? "textureSampleBias" : "textureSample", tex, smp);
 		if (arrayed) {
 			cspv_wg_expr(g, args[1], 2);
 			sappend(*out, ".xy, ");
@@ -11387,6 +11423,9 @@ static void cspv_wg_texture(cspv_wg* g, cspv_expr* e)
 			cspv_wg_expr(g, args[2], 0);
 			sappend(*out, ", ");
 			cspv_wg_expr(g, args[3], 0);
+		} else if (bias) {
+			sappend(*out, ", ");
+			cspv_wg_expr_to(g, args[2], ctx->t_float, 0);
 		} else if (level0) {
 			sappend(*out, ", 0.0");
 		}
