@@ -475,6 +475,7 @@ enum
 	CSpvOpImageSampleDrefImplicitLod = 89,
 	CSpvOpImageSampleDrefExplicitLod = 90,
 	CSpvOpImageFetch           = 95,
+	CSpvOpImageGather          = 96,
 	CSpvOpImageRead            = 98,
 	CSpvOpImageWrite           = 99,
 	CSpvOpImage                = 100,
@@ -1060,6 +1061,8 @@ typedef struct cspv_ctx
 	uint32_t frag_depth_var; // Nonzero once the shader references gl_FragDepth.
 	uint32_t front_facing_var; // Nonzero once the shader reads gl_FrontFacing.
 	uint32_t sample_id_var; // Nonzero once the shader reads gl_SampleID (which shades per sample).
+	const char* es_unsupported; // The first function used that GLSL ES 3.00 lacks, and its line.
+	int es_unsupported_line;
 
 	// Reflection, built up during global declaration codegen. Ownership transfers
 	// to CSPV_Result on success.
@@ -3958,6 +3961,7 @@ typedef enum cspv_intrin_kind
 	CSPV_INTRIN_TEXTURE_GRAD, // textureGrad(sampler, uv, dPdx, dPdy)
 	CSPV_INTRIN_TEXEL_FETCH,  // texelFetch(sampler, ivec2, lod)
 	CSPV_INTRIN_TEXTURE_SIZE, // textureSize(sampler, lod) -> ivec2
+	CSPV_INTRIN_TEXTURE_GATHER, // textureGather(sampler, uv[, comp]) -> vec4
 	CSPV_INTRIN_RELATIONAL,   // lessThan & friends: (vecN, vecN) -> bvecN.
 	CSPV_INTRIN_BOOL_REDUCE,  // all/any: bvecN -> bool.
 	CSPV_INTRIN_BOOL_NOT,     // not(bvecN) -> bvecN.
@@ -4055,6 +4059,7 @@ static void cspv_init_intrins(void)
 	cspv_add_intrin("textureGrad", CSPV_INTRIN_TEXTURE_GRAD, 0, 4);
 	cspv_add_intrin("texelFetch", CSPV_INTRIN_TEXEL_FETCH, 0, 3);
 	cspv_add_intrin("textureSize", CSPV_INTRIN_TEXTURE_SIZE, 0, 2);
+	cspv_add_intrin("textureGather", CSPV_INTRIN_TEXTURE_GATHER, 0, -2);
 	cspv_add_intrin_full("lessThan", CSPV_INTRIN_RELATIONAL, CSpvOpFOrdLessThan, CSpvOpSLessThan, CSpvOpULessThan, 2, 0);
 	cspv_add_intrin_full("lessThanEqual", CSPV_INTRIN_RELATIONAL, CSpvOpFOrdLessThanEqual, CSpvOpSLessThanEqual, CSpvOpULessThanEqual, 2, 0);
 	cspv_add_intrin_full("greaterThan", CSPV_INTRIN_RELATIONAL, CSpvOpFOrdGreaterThan, CSpvOpSGreaterThan, CSpvOpUGreaterThan, 2, 0);
@@ -4129,11 +4134,15 @@ static cspv_value cspv_gen_intrin(cspv_ctx* ctx, cspv_expr* e, cspv_intrin* in)
 	if (in->nargs == -1 && argc != 1 && argc != 2) {
 		cspv_errorf(ctx, e->line, "'%s' expects 1 or 2 arguments, got %d", e->u.call.name, argc);
 	}
+	if (in->nargs == -2 && argc != 2 && argc != 3) {
+		cspv_errorf(ctx, e->line, "'%s' expects 2 or 3 arguments, got %d", e->u.call.name, argc);
+	}
 
 	// Sampler-based intrinsics.
 	if (in->kind == CSPV_INTRIN_TEXTURE || in->kind == CSPV_INTRIN_TEXTURE_OFFSET ||
 	    in->kind == CSPV_INTRIN_TEXTURE_LOD || in->kind == CSPV_INTRIN_TEXTURE_GRAD ||
-	    in->kind == CSPV_INTRIN_TEXEL_FETCH || in->kind == CSPV_INTRIN_TEXTURE_SIZE) {
+	    in->kind == CSPV_INTRIN_TEXEL_FETCH || in->kind == CSPV_INTRIN_TEXTURE_SIZE ||
+	    in->kind == CSPV_INTRIN_TEXTURE_GATHER) {
 		cspv_type* st = NULL;
 		uint32_t sampler = cspv_gen_rvalue(ctx, e->u.call.args[0], &st);
 		if (st->kind != CSPV_T_SAMPLER2D) cspv_errorf(ctx, e->line, "'%s' requires a sampler type", e->u.call.name);
@@ -4157,6 +4166,33 @@ static cspv_value cspv_gen_intrin(cspv_ctx* ctx, cspv_expr* e, cspv_intrin* in)
 		// separate Dref operand.
 		cspv_type* coord_t = sdim == CSPV_SDIM_2D ? ctx->t_vec[0] :
 		                     (sdim == CSPV_SDIM_CUBE_SHADOW || sdim == CSPV_SDIM_2D_ARRAY_SHADOW) ? ctx->t_vec[2] : ctx->t_vec[1];
+
+		if (in->kind == CSPV_INTRIN_TEXTURE_GATHER) {
+			// textureGather(sampler, P[, comp]): component comp (x by default) of the four
+			// texels bilinear filtering at P would blend, in GLSL's order (i0j1, i1j1,
+			// i1j0, i0j0). comp must be an integer literal, which every backend can name.
+			if (sdim != CSPV_SDIM_2D && sdim != CSPV_SDIM_2D_ARRAY && sdim != CSPV_SDIM_CUBE) {
+				cspv_errorf(ctx, e->line, "textureGather requires a sampler2D, sampler2DArray, or samplerCube");
+			}
+			int comp = 0;
+			if (asize(e->u.call.args) == 3) {
+				cspv_expr* c = e->u.call.args[2];
+				if (c->kind != CSPV_E_INT_LIT || c->u.ival > 3) {
+					cspv_errorf(ctx, e->line, "textureGather's component must be an integer literal, 0 to 3");
+				}
+				comp = (int)c->u.ival;
+				c->rtype = ctx->t_int;
+			}
+			uint32_t coord = cspv_gen_rvalue_as(ctx, e->u.call.args[1], coord_t);
+			uint32_t result = cspv_new_id(ctx);
+			uint32_t w[5] = { cspv_type_id(ctx, vec4_t), result, sampler, coord, cspv_const_int(ctx, comp) };
+			cspv_emit(&ctx->body, CSpvOpImageGather, w, 5);
+			if (!ctx->es_unsupported) {
+				ctx->es_unsupported = "textureGather";
+				ctx->es_unsupported_line = e->line;
+			}
+			return cspv_rvalue(vec4_t, result);
+		}
 
 		if (in->kind == CSPV_INTRIN_TEXTURE) {
 			uint32_t coord = cspv_gen_rvalue_as(ctx, e->u.call.args[1], coord_t);
@@ -7970,6 +8006,7 @@ static void cspv_emit_glsl300(cspv_ctx* ctx)
 	bool cs = ctx->stage == CSPV_STAGE_COMPUTE;
 	if (cs) cspv_es_cs_validate(ctx);
 	if (ctx->sample_id_var) cspv_errorf(ctx, 0, "gl_SampleID is not supported in GLSL ES 3.00 output");
+	if (ctx->es_unsupported) cspv_errorf(ctx, ctx->es_unsupported_line, "%s is not supported in GLSL ES 3.00 output", ctx->es_unsupported);
 	for (int i = 0; i < (int)asize(ctx->decls) && !cs; i++) {
 		cspv_decl* d = ctx->decls + i;
 		if (d->kind == CSPV_D_BLOCK && d->is_buffer) {
@@ -8391,6 +8428,14 @@ static void cspv_hlsl_call(cspv_tp* g, cspv_expr* e)
 			sappend(*out, hwide ? ").xyz, (" : ").xy, (");
 			cspv_tp_expr(g, args[1], 2);
 			sappend(*out, hwide ? ").w)" : ").z)");
+			return;
+		}
+		if (!strcmp(name, "textureGather")) {
+			static const char* gather[4] = { "GatherRed", "GatherGreen", "GatherBlue", "GatherAlpha" };
+			int comp = argc == 3 ? (int)args[2]->u.ival : 0;
+			sfmt_append(*out, "%s_tex.%s(%s_smp, ", s, gather[comp], s);
+			cspv_tp_expr(g, args[1], 2);
+			spush(*out, ')');
 			return;
 		}
 		if (!strcmp(name, "texture")) {
@@ -9215,6 +9260,24 @@ static void cspv_msl_call(cspv_tp* g, cspv_expr* e)
 			sappend(*out, mcube ? ").w" : ").z");
 			if (no_gradients) sappend(*out, ", level(0)");
 			spush(*out, ')');
+			return;
+		}
+		if (!strcmp(name, "textureGather")) {
+			// gather(sampler, coord[, layer][, offset], component); a cube takes no offset.
+			static const char* comp_name[4] = { "x", "y", "z", "w" };
+			int comp = argc == 3 ? (int)args[2]->u.ival : 0;
+			sfmt_append(*out, "%s_tex.gather(%s_smp, ", s, s);
+			if (arrayed) {
+				spush(*out, '(');
+				cspv_tp_expr(g, args[1], 2);
+				sappend(*out, ").xy, uint(rint((");
+				cspv_tp_expr(g, args[1], 2);
+				sappend(*out, ").z)), int2(0)");
+			} else {
+				cspv_tp_expr(g, args[1], 2);
+				if (sdim != CSPV_SDIM_CUBE) sappend(*out, ", int2(0)");
+			}
+			sfmt_append(*out, ", component::%s)", comp_name[comp]);
 			return;
 		}
 		if (arrayed && (!strcmp(name, "texture") || !strcmp(name, "textureLod") || !strcmp(name, "textureGrad"))) {
@@ -11288,6 +11351,18 @@ static void cspv_wg_texture(cspv_wg* g, cspv_expr* e)
 		if (offset) {
 			sappend(*out, ", ");
 			cspv_wg_expr(g, args[2], 0);
+		}
+		spush(*out, ')');
+		return;
+	}
+	if (!strcmp(name, "textureGather")) {
+		sfmt_append(*out, "textureGather(%d, %s, %s, ", (int)(asize(args) == 3 ? args[2]->u.ival : 0), tex, smp);
+		if (arrayed) {
+			cspv_wg_expr(g, args[1], 2);
+			sappend(*out, ".xy, ");
+			cspv_wg_layer(g, args[1], "z");
+		} else {
+			cspv_wg_expr(g, args[1], 0);
 		}
 		spush(*out, ')');
 		return;
