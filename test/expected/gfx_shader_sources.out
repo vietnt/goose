@@ -5,3 +5,4 @@ through a second global: GSHD stage 1
 vertex: GSHD stage 0
 compute: GSHD stage 2
 local size 8 x 4 x 1
+demote: GSHD stage 1
