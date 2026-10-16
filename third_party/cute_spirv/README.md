@@ -1,9 +1,9 @@
 # cute_spirv
 
-`cute_spirv.h` (v1.09) and its dependency `ckit.h`, copied unmodified from
+`cute_spirv.h` (v1.11) and its dependency `ckit.h`, copied unmodified from
 [RandyGaul/cute_framework](https://github.com/RandyGaul/cute_framework),
-`libraries/cute/`, at commit `d7db751c67e723aea0724571ed22705641f06eac`
-(2026-09-15).
+`libraries/cute/`, at commit `5e066a31b0a11e9ac923a2f0b5e4687d57797a10`
+(2026-10-13). `cute_spirv.h` last changed there in `a5c53e4a7`.
 
 `cute_spirv.h` compiles a subset of GLSL 450 to SPIR-V and transpiles it to
 HLSL (Shader Model 5.1) and MSL, following SDL_GPU's binding conventions. The
