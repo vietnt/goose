@@ -57,6 +57,20 @@ go to cute_framework, and each with a fixture in `test/gfx/`:
   `shaderDemoteToHelperInvocation`, which the compiler's built-in gfx does
   not request, so its pixel fixture is `gfx_demote` in goose_gfx;
   `gfx_shader_sources` here checks that it compiles.
+* HLSL storage buffers are `ByteAddressBuffer`/`RWByteAddressBuffer`
+  accessed at their std430 byte offsets, not `(RW)StructuredBuffer<T>`:
+  SDL_GPU's Direct3D 12 backend views every storage buffer as raw
+  (`R32_TYPELESS`, no structure stride), and a structured buffer over such a
+  view read every element as the first on an AMD driver. An element reads
+  through the buffer's loader `cf_ld_<name>(i)`; a write, compound
+  assignment, `++` or `--` is one `Store`/`Store2`/`3`/`4` at the lvalue's
+  offset (a whole struct through `cf_st_<name>`); an atomic is the buffer's
+  `Interlocked*` at that offset; `.length()` is the byte size over the
+  stride. As in the GLES backend, a write must be a statement, a write
+  through a swizzle must name consecutive components in order, and a buffer
+  element cannot be an `out` or `inout` argument; each is a compile error
+  naming HLSL. Structs no longer carry padding fields in HLSL
+  (`gfx_storage_layout`).
 
 To update, copy both files from a newer cute_framework commit, record that
 commit here, and apply the local changes above that it does not have.
