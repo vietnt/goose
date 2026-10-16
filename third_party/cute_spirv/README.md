@@ -25,6 +25,10 @@ go to cute_framework, and each with a fixture in `test/gfx/`:
   `SV_IsFrontFace`, MSL `[[front_facing]]`, WGSL `@builtin(front_facing)`;
   GLSL ES has it. Declared on first use, as `gl_FragDepth` is
   (`gfx_front_facing`).
+* `gl_SampleID` in fragment shaders, which makes them run once per sample:
+  SPIR-V `BuiltIn SampleId` (flat) with the `SampleRateShading` capability,
+  HLSL `SV_SampleIndex`, MSL `[[sample_id]]`, WGSL `@builtin(sample_index)`;
+  a compile error for GLSL ES 3.00, which has none (`gfx_sample_id`).
 
 To update, copy both files from a newer cute_framework commit, record that
 commit here, and apply the local changes above that it does not have.
