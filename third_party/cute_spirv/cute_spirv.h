@@ -1064,6 +1064,7 @@ typedef struct cspv_ctx
 	uint32_t front_facing_var; // Nonzero once the shader reads gl_FrontFacing.
 	uint32_t sample_id_var; // Nonzero once the shader reads gl_SampleID (which shades per sample).
 	bool uses_demote; // Needs SPV_EXT_demote_to_helper_invocation.
+	bool uses_cas; // atomicCompSwap was called: MSL output needs its cf_cas helper.
 	const char* es_unsupported; // The first function used that GLSL ES 3.00 lacks, and its line.
 	int es_unsupported_line;
 
@@ -4417,6 +4418,7 @@ static cspv_value cspv_gen_intrin(cspv_ctx* ctx, cspv_expr* e, cspv_intrin* in)
 		uint32_t tid = cspv_type_id(ctx, mem.type);
 		if (in->shape == 1) {
 			// atomicCompSwap(mem, compare, value)
+			ctx->uses_cas = true;
 			uint32_t cmp = cspv_gen_rvalue_as(ctx, e->u.call.args[1], mem.type);
 			uint32_t val = cspv_gen_rvalue_as(ctx, e->u.call.args[2], mem.type);
 			uint32_t w[8] = { tid, result, mem.id, scope, semantics, semantics, val, cmp };
@@ -9784,6 +9786,8 @@ static void cspv_msl_call(cspv_tp* g, cspv_expr* e)
 		else if (!strcmp(name, "atomicOr")) aop = "atomic_fetch_or_explicit";
 		else if (!strcmp(name, "atomicXor")) aop = "atomic_fetch_xor_explicit";
 		else if (!strcmp(name, "atomicExchange")) aop = "atomic_exchange_explicit";
+		bool cas = !strcmp(name, "atomicCompSwap");
+		if (cas) aop = "cf_cas";
 		if (aop) {
 			cspv_expr* dest = args[0];
 			cspv_expr* root = dest;
@@ -9819,6 +9823,16 @@ static void cspv_msl_call(cspv_tp* g, cspv_expr* e)
 			cspv_tp_expr(g, dest, 0);
 			if (comp >= 0) sfmt_append(*out, ") + %d, ", comp);
 			else sappend(*out, "), ");
+			if (cas) {
+				// Both operands of the atomic's own type, which cf_cas deduces once.
+				const char* t = is_int ? "int" : "uint";
+				sfmt_append(*out, "(%s)(", t);
+				cspv_tp_expr(g, args[1], 0);
+				sfmt_append(*out, "), (%s)(", t);
+				cspv_tp_expr(g, args[2], 0);
+				sappend(*out, "))");
+				return;
+			}
 			cspv_tp_expr(g, args[1], 2);
 			sappend(*out, ", memory_order_relaxed)");
 			return;
@@ -10013,6 +10027,14 @@ static void cspv_emit_msl(cspv_ctx* ctx)
 		"float4 cf_mod(float4 x, float y) { return x - y * floor(x / y); }\n"
 		"template <typename T> T cf_radians(T d) { return d * T(0.017453292519943295); }\n"
 		"template <typename T> T cf_degrees(T r) { return r * T(57.29577951308232); }\n");
+	// atomicCompSwap is strong; Metal's compare-exchange is weak (it may fail spuriously), so
+	// it retries until the value read differs from `c`, and returns the value it found.
+	if (ctx->uses_cas) {
+		sappend(ctx->tp_out,
+			"template <typename A, typename T> T cf_cas(A p, T c, T v) { T e = c; "
+			"while (!atomic_compare_exchange_weak_explicit(p, &e, v, memory_order_relaxed, memory_order_relaxed) && e == c) {} "
+			"return e; }\n");
+	}
 
 	// ---- Program-scope declarations: user structs, uniform-block structs,
 	// const globals. Everything mutable lives inside cf_shader below. ----
