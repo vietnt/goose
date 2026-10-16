@@ -25,8 +25,13 @@ python3 test/run_gfx_tests.py --require-gpu --validate --goose <path>/build/goos
 git push --force-with-lease origin rome
 ```
 
-When CI is green on `rome`, tag the release; the tag starts the Release
-workflow, which builds and publishes the four archives:
+The CI workflow is disabled in this fork's Actions settings; the Release
+workflow stays active. Nothing tests a release on all four platforms before
+it ships, so before every release tag run the full compiler suite and the
+goose_gfx suite with `--validate` on Linux with Lavapipe, and on macOS
+(Metal) and Windows (Direct3D 12 and Vulkan) as well when the change touches
+backend code. Then tag the release; the tag starts the Release workflow,
+which builds and publishes the four archives:
 
 ```sh
 git tag -a v2026.1-rome.<n> -m "Goose v2026.1-rome.<n>" && git push origin v2026.1-rome.<n>
