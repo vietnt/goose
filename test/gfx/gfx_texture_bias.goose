@@ -42,7 +42,7 @@ fn main() {
             gfx::begin_pass(out, gfx::Texture { 0 }, float4 { 0.0, 0.0, 0.0, 0.0 });
             gfx::bind(biased);
             gfx::bind_texture(gfx::FRAGMENT, 0, tex, nearest_mip);
-            gfx::uniforms(gfx::FRAGMENT, 0, Draw { bias: bias as f32, size: size as f32 });
+            gfx::uniforms(gfx::FRAGMENT, 0, Draw { bias: bias as f32, size: size });
             gfx::draw(3);
             gfx::end_pass();
             print(size, " x ", size, ", bias ", bias, ": ", texels(gfx::read_pixels(out)));
