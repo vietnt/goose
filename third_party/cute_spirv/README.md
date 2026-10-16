@@ -71,6 +71,11 @@ go to cute_framework, and each with a fixture in `test/gfx/`:
   element cannot be an `out` or `inout` argument; each is a compile error
   naming HLSL. Structs no longer carry padding fields in HLSL
   (`gfx_storage_layout`).
+* Not changed, a known limit: in MSL a runtime array's `.length()` prints
+  as 0, since SDL_GPU's Metal backend gives a shader no buffer sizes; HLSL
+  and SPIR-V query it. A hidden uniform block of buffer sizes, which the
+  gfx layer would fill, is the planned fix (goose_gfx's `docs/gfx.md`,
+  follow-up work).
 * `atomicCompSwap` in MSL, which printed as itself and failed in Metal's
   compiler: `cf_cas`, emitted only when a shader uses it, retries
   `atomic_compare_exchange_weak_explicit` while it fails spuriously (GLSL's
