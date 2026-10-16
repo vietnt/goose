@@ -42,6 +42,10 @@ go to cute_framework, and each with a fixture in `test/gfx/`:
 * `texture(sampler, P, bias)` in fragment shaders, on every dim but the
   shadow ones: SPIR-V `Bias` operand, HLSL `SampleBias`, MSL `bias(b)`, WGSL
   `textureSampleBias`; GLSL ES has it (`gfx_texture_bias`).
+* MSL's sample options are written `metal::level`, `metal::bias` and
+  `metal::gradient2d`/`cube`/`3d`, so a local or parameter of the same name
+  (`float level`) no longer hides them and breaks the MSL
+  (`gfx_texture_bias`).
 
 To update, copy both files from a newer cute_framework commit, record that
 commit here, and apply the local changes above that it does not have.

@@ -9301,7 +9301,7 @@ static void cspv_msl_call(cspv_tp* g, cspv_expr* e)
 			sappend(*out, ").z)), (");
 			cspv_tp_expr(g, args[1], 2);
 			sappend(*out, ").w");
-			if (no_gradients) sappend(*out, ", level(0)");
+			if (no_gradients) sappend(*out, ", metal::level(0)");
 			spush(*out, ')');
 			return;
 		}
@@ -9318,7 +9318,7 @@ static void cspv_msl_call(cspv_tp* g, cspv_expr* e)
 			sappend(*out, mcube ? ").xyz, (" : ").xy, (");
 			cspv_tp_expr(g, args[1], 2);
 			sappend(*out, mcube ? ").w" : ").z");
-			if (no_gradients) sappend(*out, ", level(0)");
+			if (no_gradients) sappend(*out, ", metal::level(0)");
 			spush(*out, ')');
 			return;
 		}
@@ -9356,21 +9356,21 @@ static void cspv_msl_call(cspv_tp* g, cspv_expr* e)
 			cspv_tp_expr(g, args[1], 2);
 			sappend(*out, ").z))");
 			if (!strcmp(name, "textureLod")) {
-				sappend(*out, ", level(");
+				sappend(*out, ", metal::level(");
 				cspv_tp_expr(g, args[2], 2);
 				spush(*out, ')');
 			} else if (!strcmp(name, "textureGrad")) {
-				sappend(*out, ", gradient2d(");
+				sappend(*out, ", metal::gradient2d(");
 				cspv_tp_expr(g, args[2], 2);
 				sappend(*out, ", ");
 				cspv_tp_expr(g, args[3], 2);
 				spush(*out, ')');
 			} else if (argc == 3) {
-				sappend(*out, ", bias(");
+				sappend(*out, ", metal::bias(");
 				cspv_tp_expr(g, args[2], 2);
 				spush(*out, ')');
 			} else if (no_gradients) {
-				sappend(*out, ", level(0)");
+				sappend(*out, ", metal::level(0)");
 			}
 			spush(*out, ')');
 			return;
@@ -9379,18 +9379,18 @@ static void cspv_msl_call(cspv_tp* g, cspv_expr* e)
 			sfmt_append(*out, "%s_tex.sample(%s_smp, ", s, s);
 			cspv_tp_expr(g, args[1], 2);
 			if (argc == 3) {
-				sappend(*out, ", bias(");
+				sappend(*out, ", metal::bias(");
 				cspv_tp_expr(g, args[2], 2);
 				spush(*out, ')');
 			}
-			if (no_gradients) sappend(*out, ", level(0)");
+			if (no_gradients) sappend(*out, ", metal::level(0)");
 			spush(*out, ')');
 			return;
 		}
 		if (!strcmp(name, "textureLod")) {
 			sfmt_append(*out, "%s_tex.sample(%s_smp, ", s, s);
 			cspv_tp_expr(g, args[1], 2);
-			sappend(*out, ", level(");
+			sappend(*out, ", metal::level(");
 			cspv_tp_expr(g, args[2], 2);
 			sappend(*out, "))");
 			return;
@@ -9401,7 +9401,7 @@ static void cspv_msl_call(cspv_tp* g, cspv_expr* e)
 			const char* grad = sdim == CSPV_SDIM_CUBE ? "gradientcube" : sdim == CSPV_SDIM_3D ? "gradient3d" : "gradient2d";
 			sfmt_append(*out, "%s_tex.sample(%s_smp, ", s, s);
 			cspv_tp_expr(g, args[1], 2);
-			sfmt_append(*out, ", %s(", grad);
+			sfmt_append(*out, ", metal::%s(", grad);
 			cspv_tp_expr(g, args[2], 2);
 			sappend(*out, ", ");
 			cspv_tp_expr(g, args[3], 2);
@@ -9416,7 +9416,7 @@ static void cspv_msl_call(cspv_tp* g, cspv_expr* e)
 				sappend(*out, ").xy, uint(rint((");
 				cspv_tp_expr(g, args[1], 2);
 				sappend(*out, ").z))");
-				if (no_gradients) sappend(*out, ", level(0)");
+				if (no_gradients) sappend(*out, ", metal::level(0)");
 				sappend(*out, ", ");
 				cspv_tp_expr(g, args[2], 2);
 				spush(*out, ')');
@@ -9424,7 +9424,7 @@ static void cspv_msl_call(cspv_tp* g, cspv_expr* e)
 			}
 			sfmt_append(*out, "%s_tex.sample(%s_smp, ", s, s);
 			cspv_tp_expr(g, args[1], 2);
-			if (no_gradients) sappend(*out, ", level(0)");
+			if (no_gradients) sappend(*out, ", metal::level(0)");
 			sappend(*out, ", ");
 			cspv_tp_expr(g, args[2], 2);
 			spush(*out, ')');
