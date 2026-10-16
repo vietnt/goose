@@ -2,11 +2,13 @@
 // is chosen. Each mip of an 8 x 8 texture is one colour: level 0 red, 1
 // green, 2 blue, 3 white. Drawn over 8 x 8 pixels (level of detail 0) and
 // over 4 x 4 (1), with the nearest mip picked, the bias moves the level read.
+// The bias passes through a parameter named bias and a local named level,
+// names Metal's sample options also have.
 import std;
 import os;
 import gfx;
 
-struct Draw { bias: f32, size: f32, pad 8 }
+struct Draw { amount: f32, size: f32, pad 8 }
 
 fn texels(px: u8[:]) -> u8[>..] { str(px[0], ",", px[1], ",", px[2], ",", px[3]) }
 
@@ -23,9 +25,13 @@ fn main() {
         """);
     let biased = gfx::pipeline(vs, embed_shader("frag", """
         layout(set = 2, binding = 0) uniform sampler2D tex;
-        layout(set = 3, binding = 0) uniform Draw { float bias; float size; };
+        layout(set = 3, binding = 0) uniform Draw { float amount; float size; };
         layout(location = 0) out vec4 result;
-        void main() { result = texture(tex, gl_FragCoord.xy / size, bias); }
+        vec4 biased(vec2 uv, float bias) { return texture(tex, uv, bias); }
+        void main() {
+            float level = amount;
+            result = biased(gl_FragCoord.xy / size, level);
+        }
         """));
     let tex = gfx::texture(gfx::TextureDesc { width: 8, height: 8, mips: 4 });
     let colours: u8[4][4] = [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255], [255, 255, 255, 255]];
@@ -42,7 +48,7 @@ fn main() {
             gfx::begin_pass(out, gfx::Texture { 0 }, float4 { 0.0, 0.0, 0.0, 0.0 });
             gfx::bind(biased);
             gfx::bind_texture(gfx::FRAGMENT, 0, tex, nearest_mip);
-            gfx::uniforms(gfx::FRAGMENT, 0, Draw { bias: bias as f32, size: size });
+            gfx::uniforms(gfx::FRAGMENT, 0, Draw { amount: bias as f32, size: size });
             gfx::draw(3);
             gfx::end_pass();
             print(size, " x ", size, ", bias ", bias, ": ", texels(gfx::read_pixels(out)));
