@@ -7369,8 +7369,8 @@ static void cspv_tp_expr_node(cspv_tp* g, cspv_expr* e, int prec)
 		if (g->hlsl || g->msl) {
 			// Neither HLSL nor MSL has .length(): sized arrays print their constant
 			// length; runtime SSBO tails call the per-buffer _len() helper (HLSL
-			// only; MSL rejects runtime .length() in validation -- Metal has no
-			// buffer-length query).
+			// only). In MSL a runtime length prints as 0: SDL_GPU's Metal backend
+			// gives a shader no buffer sizes (a known limit, see the README).
 			cspv_expr* b = e->u.member.base;
 			cspv_type* bt = cspv_tp_rtype(g, b);
 			cspv_decl* bd = cspv_tp_named_buffer_member(g, b);
@@ -7381,7 +7381,7 @@ static void cspv_tp_expr_node(cspv_tp* g, cspv_expr* e, int prec)
 			} else if (g->hlsl && b->kind == CSPV_E_REF) {
 				sfmt_append(g->ctx->tp_out, "int(%s_len())", b->u.name);
 			} else {
-				sappend(g->ctx->tp_out, "0"); // Unreachable for the supported subset.
+				sappend(g->ctx->tp_out, "0"); // MSL: no buffer sizes to divide.
 			}
 			break;
 		}
