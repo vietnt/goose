@@ -34,6 +34,11 @@ go to cute_framework, and each with a fixture in `test/gfx/`:
   `OpImageGather`, HLSL `GatherRed`/`GatherGreen`/`GatherBlue`/`GatherAlpha`,
   MSL `gather(..., component::x)` to `::w`, WGSL `textureGather`; a compile
   error for GLSL ES 3.00, which has none (`gfx_gather`).
+* `textureQueryLod(sampler, P)` in fragment shaders, on every dim but the
+  shadow ones: SPIR-V `OpImageQueryLod` (with the `ImageQuery` capability),
+  HLSL `CalculateLevelOfDetail` and `CalculateLevelOfDetailUnclamped`, MSL
+  `calculate_clamped_lod` and `calculate_unclamped_lod`; a compile error for
+  GLSL ES 3.00 and WGSL, which have none (`gfx_query_lod`).
 
 To update, copy both files from a newer cute_framework commit, record that
 commit here, and apply the local changes above that it does not have.
