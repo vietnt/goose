@@ -29,6 +29,11 @@ go to cute_framework, and each with a fixture in `test/gfx/`:
   SPIR-V `BuiltIn SampleId` (flat) with the `SampleRateShading` capability,
   HLSL `SV_SampleIndex`, MSL `[[sample_id]]`, WGSL `@builtin(sample_index)`;
   a compile error for GLSL ES 3.00, which has none (`gfx_sample_id`).
+* `textureGather(sampler, P[, comp])` on `sampler2D`, `sampler2DArray` and
+  `samplerCube`, with `comp` an integer literal 0 to 3: SPIR-V
+  `OpImageGather`, HLSL `GatherRed`/`GatherGreen`/`GatherBlue`/`GatherAlpha`,
+  MSL `gather(..., component::x)` to `::w`, WGSL `textureGather`; a compile
+  error for GLSL ES 3.00, which has none (`gfx_gather`).
 
 To update, copy both files from a newer cute_framework commit, record that
 commit here, and apply the local changes above that it does not have.
