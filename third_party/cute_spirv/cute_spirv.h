@@ -6998,6 +6998,191 @@ static const char* cspv_es_compound_op(int op)
 	}
 }
 
+//--------------------------------------------------------------------------------------------------
+// HLSL storage buffers. SDL_GPU's D3D12 backend views every storage buffer as raw
+// (R32_TYPELESS, no structure stride), and a StructuredBuffer over such a view reads
+// every element as the first on some drivers. So a buffer block prints as a
+// (RW)ByteAddressBuffer accessed at its std430 byte offsets: reads through the buffer's
+// element loader cf_ld_<res>, writes and atomics at the byte offset of their lvalue.
+
+// The resource a buffer block prints as: its array's name, or `inst_data` for a named instance.
+static void cspv_hlsl_buffer_res(cspv_decl* d, char* buf, size_t n)
+{
+	if (d->instance_name) snprintf(buf, n, "%s_%s", d->instance_name, d->member_names[0]);
+	else snprintf(buf, n, "%s", d->member_names[0]);
+}
+
+// Byte stride of a buffer block's runtime array: its element's std430 size rounded up to
+// its alignment, as the SPIR-V ArrayStride.
+static int cspv_hlsl_buffer_stride(cspv_ctx* ctx, cspv_decl* d)
+{
+	int a = 0, s = 0;
+	cspv_std430_layout(ctx, d->member_types[0]->elem, d->line, &a, &s);
+	return (s + a - 1) / a * a;
+}
+
+// The value of type `t` (a scalar, vector or struct of them) at byte `at + off` of `res`.
+static void cspv_hlsl_bab_load(cspv_tp* g, cspv_type* t, const char* res, const char* at, int off)
+{
+	cspv_ctx* ctx = g->ctx;
+	if (t->kind == CSPV_T_STRUCT) {
+		sfmt_append(ctx->tp_out, "cf_make_%s(", t->name);
+		for (int i = 0; i < (int)asize(t->field_types); i++) {
+			if (i) sappend(ctx->tp_out, ", ");
+			cspv_hlsl_bab_load(g, t->field_types[i], res, at, off + cspv_es_field_offset(ctx, t, i, 0) * 4);
+		}
+		spush(ctx->tp_out, ')');
+		return;
+	}
+	cspv_type_kind ek = cspv_elem_type(t)->kind;
+	int n = t->kind == CSPV_T_VEC ? t->cols : 1;
+	static const char* suffix[5] = { "", "", "2", "3", "4" };
+	sfmt_append(ctx->tp_out, "%s(%s.Load%s(%s + %du))", ek == CSPV_T_FLOAT ? "asfloat" : ek == CSPV_T_INT ? "asint" : "",
+		res, suffix[n], at, off);
+}
+
+// Walks a storage-buffer lvalue from its root element outward, as cspv_es_cs_path does but in
+// bytes: with `g`, prints its dynamic terms (`uint(i) * S + uint(j) * 4u`); adds the static part
+// to *off and returns the type at `e`. A swizzle must name consecutive components in order, which
+// are one contiguous store.
+static cspv_type* cspv_hlsl_bab_path(cspv_ctx* ctx, cspv_tp* g, cspv_expr* e, cspv_expr* root, cspv_decl* d, int* off)
+{
+	if (e == root) {
+		if (g) {
+			sappend(ctx->tp_out, "uint(");
+			cspv_tp_expr(g, e->u.index.index, 0);
+			sfmt_append(ctx->tp_out, ") * %du", cspv_hlsl_buffer_stride(ctx, d));
+		}
+		return d->member_types[0]->elem;
+	}
+	if (e->kind == CSPV_E_MEMBER) {
+		cspv_type* t = cspv_hlsl_bab_path(ctx, g, e->u.member.base, root, d, off);
+		if (t->kind == CSPV_T_STRUCT) {
+			int fi = cspv_es_field_index(t, e->u.member.member);
+			if (fi < 0) cspv_errorf(ctx, e->line, "unknown field '%s'", e->u.member.member);
+			*off += cspv_es_field_offset(ctx, t, fi, e->line) * 4;
+			return t->field_types[fi];
+		}
+		if (t->kind == CSPV_T_VEC) {
+			const char* sw = e->u.member.member;
+			int n = (int)strlen(sw);
+			int first = cspv_es_swizzle_index(sw[0]);
+			for (int k = 1; k < n; k++) {
+				if (cspv_es_swizzle_index(sw[k]) != first + k) {
+					cspv_errorf(ctx, e->line, "writing a storage-buffer vector through '.%s' is not supported in HLSL output: write its components one at a time, or the whole vector", sw);
+				}
+			}
+			*off += first * 4;
+			return n == 1 ? t->elem : cspv_vec_type(ctx, t->elem, n);
+		}
+	} else if (e->kind == CSPV_E_INDEX) {
+		cspv_type* t = cspv_hlsl_bab_path(ctx, g, e->u.index.base, root, d, off);
+		if (t->kind == CSPV_T_VEC) {
+			if (g) {
+				sappend(ctx->tp_out, " + uint(");
+				cspv_tp_expr(g, e->u.index.index, 0);
+				sappend(ctx->tp_out, ") * 4u");
+			}
+			return t->elem;
+		}
+	}
+	cspv_errorf(ctx, e->line, "this storage-buffer write target is not supported in HLSL output");
+	return NULL;
+}
+
+// The byte offset of storage-buffer lvalue `lval`, printed; returns its type.
+static cspv_type* cspv_hlsl_bab_offset(cspv_tp* g, cspv_expr* lval, cspv_decl** d)
+{
+	cspv_expr* root = cspv_es_buffer_root(g->ctx, lval, g->shadows, d);
+	int off = 0;
+	cspv_type* t = cspv_hlsl_bab_path(g->ctx, g, lval, root, *d, &off);
+	sfmt_append(g->ctx->tp_out, " + %du", off);
+	return t;
+}
+
+// A write into a storage buffer -- `lval = v`, a compound assignment, ++ or -- -- as one store
+// at the lvalue's byte offset. Compound forms read the lvalue back through the loader (lvalues
+// are side-effect free, as for `v *= M` below).
+static void cspv_hlsl_bab_store(cspv_tp* g, cspv_expr* e, cspv_expr* lval)
+{
+	cspv_ctx* ctx = g->ctx;
+	cspv_decl* d = NULL;
+	cspv_expr* root = cspv_es_buffer_root(ctx, lval, g->shadows, &d);
+	int unused = 0;
+	cspv_type* t = cspv_hlsl_bab_path(ctx, NULL, lval, root, d, &unused);
+	char res[128];
+	cspv_hlsl_buffer_res(d, res, sizeof(res));
+	bool whole = t->kind == CSPV_T_STRUCT;
+	static const char* suffix[5] = { "", "", "2", "3", "4" };
+	if (whole) sfmt_append(ctx->tp_out, "cf_st_%s(", res);
+	else sfmt_append(ctx->tp_out, "%s.Store%s(", res, suffix[t->kind == CSPV_T_VEC ? t->cols : 1]);
+	cspv_hlsl_bab_offset(g, lval, &d);
+	sappend(ctx->tp_out, ", ");
+	if (!whole) sfmt_append(ctx->tp_out, "asuint((%s)(", cspv_hlsl_type_name(t));
+	if (e->kind == CSPV_E_UNARY) {
+		cspv_type_kind ek = cspv_elem_type(t)->kind;
+		spush(ctx->tp_out, '(');
+		cspv_tp_expr(g, lval, 0);
+		sfmt_append(ctx->tp_out, ") %s %s", e->u.un.op == CSPV_P_INC ? "+" : "-",
+			ek == CSPV_T_FLOAT ? "1.0" : ek == CSPV_T_UINT ? "1u" : "1");
+	} else if (e->u.bin.op == '=') {
+		cspv_tp_expr(g, e->u.bin.r, 0);
+	} else {
+		int op = e->u.bin.op;
+		cspv_expr* r = e->u.bin.r;
+		cspv_type* rt = cspv_tp_rtype(g, r);
+		if (op == CSPV_P_MUL_ASSIGN && rt && rt->kind == CSPV_T_MAT) {
+			sappend(ctx->tp_out, "mul(");
+			cspv_tp_expr(g, lval, 2);
+			sappend(ctx->tp_out, ", ");
+			cspv_tp_expr(g, r, 2);
+			spush(ctx->tp_out, ')');
+		} else {
+			cspv_type* target = NULL;
+			if (cspv_tp_numeric(t) && cspv_tp_numeric(rt) && cspv_elem_type(t)->kind != cspv_elem_type(rt)->kind &&
+			    op != CSPV_P_SHL_ASSIGN && op != CSPV_P_SHR_ASSIGN) {
+				target = cspv_vec_type(ctx, cspv_elem_type(t), cspv_num_components(rt));
+			}
+			spush(ctx->tp_out, '(');
+			cspv_tp_expr(g, lval, 0);
+			sfmt_append(ctx->tp_out, ") %s (", cspv_es_compound_op(op));
+			if (target) cspv_tp_expr_to(g, r, target, 0);
+			else cspv_tp_expr(g, r, 0);
+			spush(ctx->tp_out, ')');
+		}
+	}
+	if (!whole) sappend(ctx->tp_out, "))");
+	spush(ctx->tp_out, ')');
+}
+
+// A buffer block's declaration: the resource, its element count, its element loader and, when
+// writable with struct elements, the whole-element store.
+static void cspv_hlsl_buffer_decl(cspv_tp* g, cspv_decl* d)
+{
+	cspv_ctx* ctx = g->ctx;
+	cspv_type* elem = d->member_types[0]->elem;
+	const char* elem_name = cspv_hlsl_type_name(elem);
+	char res[128];
+	cspv_hlsl_buffer_res(d, res, sizeof(res));
+	int stride = cspv_hlsl_buffer_stride(ctx, d);
+	sfmt_append(ctx->tp_out, "%sByteAddressBuffer %s : register(%c%d, space%d);\n",
+		d->readonly ? "" : "RW", res, d->readonly ? 't' : 'u', d->binding, d->set);
+	sfmt_append(ctx->tp_out, "uint %s_len() { uint n; %s.GetDimensions(n); return n / %du; }\n", res, res, stride);
+	sfmt_append(ctx->tp_out, "%s cf_ld_%s(uint i) { uint w = i * %du; return ", elem_name, res, stride);
+	cspv_hlsl_bab_load(g, elem, res, "w", 0);
+	sappend(ctx->tp_out, "; }\n");
+	if (!d->readonly && elem->kind == CSPV_T_STRUCT) {
+		static const char* suffix[5] = { "", "", "2", "3", "4" };
+		sfmt_append(ctx->tp_out, "void cf_st_%s(uint w, %s v) {", res, elem_name);
+		for (int i = 0; i < (int)asize(elem->field_types); i++) {
+			cspv_type* ft = elem->field_types[i];
+			sfmt_append(ctx->tp_out, " %s.Store%s(w + %du, asuint(v.%s));", res, suffix[ft->kind == CSPV_T_VEC ? ft->cols : 1],
+				cspv_es_field_offset(ctx, elem, i, d->line) * 4, elem->field_names[i]);
+		}
+		sappend(ctx->tp_out, " }\n");
+	}
+}
+
 // Write site `k` as a capture: the destination (coordinate or word offset) and the value are
 // evaluated every pass, exactly as the original statement evaluated them; only the active
 // site's pass records them into cspv_value/cspv_target.
@@ -7153,6 +7338,15 @@ static void cspv_tp_expr_node(cspv_tp* g, cspv_expr* e, int prec)
 		// storing through transpose() is not an lvalue in HLSL, but no output of ours writes
 		// into a matrix column either.
 		if (g->hlsl) {
+			cspv_decl* bd = cspv_es_buffer_array(g->ctx, e->u.index.base, g->shadows);
+			if (bd) {
+				char res[128];
+				cspv_hlsl_buffer_res(bd, res, sizeof(res));
+				sfmt_append(g->ctx->tp_out, "cf_ld_%s(uint(", res);
+				cspv_tp_expr(g, e->u.index.index, 0);
+				sappend(g->ctx->tp_out, "))");
+				break;
+			}
 			cspv_type* bt = cspv_tp_rtype(g, e->u.index.base);
 			if (bt && bt->kind == CSPV_T_MAT) {
 				sappend(g->ctx->tp_out, "transpose(");
@@ -7242,6 +7436,11 @@ static void cspv_tp_expr_node(cspv_tp* g, cspv_expr* e, int prec)
 	case CSPV_E_UNARY: {
 		int op = e->u.un.op;
 		if (op == CSPV_P_INC || op == CSPV_P_DEC) {
+			cspv_decl* bd = NULL;
+			if (g->hlsl && cspv_es_buffer_root(g->ctx, e->u.un.e, g->shadows, &bd)) {
+				cspv_hlsl_bab_store(g, e, e->u.un.e);
+				break;
+			}
 			int myprec = e->u.un.postfix ? 15 : 14;
 			bool paren = myprec < prec;
 			if (paren) spush(g->ctx->tp_out, '(');
@@ -7270,6 +7469,12 @@ static void cspv_tp_expr_node(cspv_tp* g, cspv_expr* e, int prec)
 		cspv_expr* l = e->u.bin.l;
 		cspv_expr* r = e->u.bin.r;
 		int myprec = cspv_tp_prec(op);
+		cspv_decl* bd = NULL;
+		if (g->hlsl && cspv_tp_is_assign_op(op) && cspv_es_buffer_root(g->ctx, l, g->shadows, &bd)) {
+			// A statement (validation), so it needs no parentheses.
+			cspv_hlsl_bab_store(g, e, l);
+			break;
+		}
 		bool paren = myprec < prec;
 		if (paren) spush(g->ctx->tp_out, '(');
 
@@ -8636,8 +8841,24 @@ static void cspv_hlsl_call(cspv_tp* g, cspv_expr* e)
 	if (!strcmp(name, "groupMemoryBarrier") || !strcmp(name, "memoryBarrierShared")) { sappend(*out, "GroupMemoryBarrier()"); return; }
 	if (!strcmp(name, "memoryBarrier") || !strcmp(name, "memoryBarrierBuffer") || !strcmp(name, "memoryBarrierImage")) { sappend(*out, "DeviceMemoryBarrier()"); return; }
 
-	// Atomics (statement position only, enforced by validation).
+	// Atomics (statement position only, enforced by validation). On a storage buffer
+	// they are the buffer's own, at the byte offset of their target.
 	const char* atomic = cspv_hlsl_atomic(name);
+	bool exchange = !strcmp(name, "atomicExchange");
+	cspv_decl* bd = NULL;
+	if ((atomic || exchange || !strcmp(name, "atomicCompSwap")) && cspv_es_buffer_root(g->ctx, args[0], g->shadows, &bd)) {
+		char res[128];
+		cspv_hlsl_buffer_res(bd, res, sizeof(res));
+		sfmt_append(*out, "%s.%s(", res, atomic ? atomic : exchange ? "InterlockedExchange" : "InterlockedCompareStore");
+		cspv_type* t = cspv_hlsl_bab_offset(g, args[0], &bd);
+		for (int i = 1; i < argc; i++) {
+			sappend(*out, ", ");
+			cspv_tp_expr(g, args[i], 2);
+		}
+		if (exchange) sappend(*out, t->kind == CSPV_T_INT ? ", cf_atomic_scratch_i" : ", cf_atomic_scratch_u");
+		spush(*out, ')');
+		return;
+	}
 	if (atomic) {
 		sfmt_append(*out, "%s(", atomic);
 		cspv_tp_expr(g, args[0], 2);
@@ -8734,6 +8955,36 @@ static void cspv_hlsl_validate_expr(cspv_ctx* ctx, cspv_expr* e, bool stmt_root)
 		if (atomic && !stmt_root) {
 			cspv_errorf(ctx, e->line, "atomic results are not supported in HLSL output; call '%s' as a statement", name);
 		}
+		cspv_decl* bd = NULL;
+		cspv_expr* root = atomic ? cspv_es_buffer_root(ctx, e->u.call.args[0], NULL, &bd) : NULL;
+		if (root) {
+			int off = 0;
+			cspv_type* t = cspv_hlsl_bab_path(ctx, NULL, e->u.call.args[0], root, bd, &off);
+			if (t->kind != CSPV_T_INT && t->kind != CSPV_T_UINT) {
+				cspv_errorf(ctx, e->line, "'%s' on a storage buffer needs an int or uint", name);
+			}
+		}
+		// A storage-buffer element prints as a value the loader returns, which an out or
+		// inout parameter cannot write back to.
+		for (int i = 0; i < (int)asize(ctx->decls); i++) {
+			cspv_decl* f = ctx->decls + i;
+			if (f->kind != CSPV_D_FUNC || f->name != name || f->num_params != (int)asize(e->u.call.args)) continue;
+			for (int p = 0; p < f->num_params; p++) {
+				if (f->params[p].qual && cspv_es_buffer_root(ctx, e->u.call.args[p], NULL, &bd)) {
+					cspv_errorf(ctx, e->line, "passing a storage-buffer element to an out or inout parameter is not supported in HLSL output; copy it to a local");
+				}
+			}
+		}
+	}
+	// A storage-buffer write prints as a store, which has no value.
+	cspv_expr* lval = NULL;
+	cspv_decl* wd = NULL;
+	if (cspv_es_cs_write(ctx, e, NULL, &lval, &wd) == 2) {
+		if (!stmt_root) {
+			cspv_errorf(ctx, e->line, "the value of a storage-buffer write is not supported in HLSL output; write it as a statement");
+		}
+		int off = 0;
+		cspv_hlsl_bab_path(ctx, NULL, lval, cspv_es_buffer_root(ctx, lval, NULL, &wd), wd, &off);
 	}
 	cspv_hlsl_validate_expr_children(ctx, e);
 }
@@ -8744,6 +8995,11 @@ static void cspv_hlsl_validate_stmt(cspv_ctx* ctx, cspv_stmt* s)
 	case CSPV_S_BLOCK: for (int i = 0; i < (int)asize(s->u.block); i++) cspv_hlsl_validate_stmt(ctx, s->u.block[i]); break;
 	case CSPV_S_DECL:
 		for (cspv_stmt* n = s; n; n = n->u.decl.next_decl) {
+			cspv_expr* lval = NULL;
+			cspv_decl* wd = NULL;
+			if (n->u.decl.init && cspv_es_cs_write(ctx, n->u.decl.init, NULL, &lval, &wd) == 2) {
+				cspv_errorf(ctx, n->line, "the value of a storage-buffer write is not supported in HLSL output; write it as a statement");
+			}
 			if (n->u.decl.init) cspv_hlsl_validate_expr(ctx, n->u.decl.init, true);
 		}
 		break;
@@ -8776,13 +9032,6 @@ static void cspv_hlsl_validate_stmt(cspv_ctx* ctx, cspv_stmt* s)
 	}
 }
 
-// Natural (tightly packed) HLSL size of a structured-buffer member type.
-static int cspv_hlsl_natural_size(cspv_type* t)
-{
-	if (t->kind == CSPV_T_VEC) return t->cols * 4;
-	return 4; // Scalars (buffer-block struct fields are scalars or vectors only).
-}
-
 // GLSL struct constructors have no HLSL/MSL equivalent: emit a factory per
 // struct (skipped when a field is an array; validation rejects those ctors).
 static void cspv_tp_struct_factory(cspv_tp* g, cspv_type* t)
@@ -8811,41 +9060,14 @@ static void cspv_tp_struct_factory(cspv_tp* g, cspv_type* t)
 
 // Emit a struct definition. Buffer structs gain explicit padding so HLSL's
 // tight structured-buffer packing lands each member on its std430 offset.
-static void cspv_hlsl_struct(cspv_tp* g, cspv_type* t, bool buffer_layout)
+static void cspv_hlsl_struct(cspv_tp* g, cspv_type* t)
 {
 	cspv_ctx* ctx = g->ctx;
 	sfmt_append(ctx->tp_out, "struct %s\n{\n", t->name);
-	int natural = 0;
-	int pad_index = 0;
 	for (int i = 0; i < (int)asize(t->field_types); i++) {
-		cspv_type* ft = t->field_types[i];
-		if (buffer_layout) {
-			int align = 0, size = 0;
-			cspv_std430_layout(ctx, ft, 0, &align, &size);
-			int target = (natural + align - 1) / align * align;
-			while (natural < target) {
-				int gap = (target - natural) / 4;
-				int n = gap > 4 ? 4 : gap;
-				if (n == 1) sfmt_append(ctx->tp_out, "\tfloat cf_pad%d;\n", pad_index++);
-				else sfmt_append(ctx->tp_out, "\tfloat%d cf_pad%d;\n", n, pad_index++);
-				natural += n * 4;
-			}
-			natural += cspv_hlsl_natural_size(ft);
-		}
 		spush(ctx->tp_out, '\t');
-		cspv_tp_var(g, ft, t->field_names[i]);
+		cspv_tp_var(g, t->field_types[i], t->field_names[i]);
 		sappend(ctx->tp_out, ";\n");
-	}
-	if (buffer_layout) {
-		int align = 0, size = 0;
-		cspv_std430_layout(ctx, t, 0, &align, &size);
-		while (natural < size) {
-			int gap = (size - natural) / 4;
-			int n = gap > 4 ? 4 : gap;
-			if (n == 1) sfmt_append(ctx->tp_out, "\tfloat cf_pad%d;\n", pad_index++);
-			else sfmt_append(ctx->tp_out, "\tfloat%d cf_pad%d;\n", n, pad_index++);
-			natural += n * 4;
-		}
 	}
 	sappend(ctx->tp_out, "};\n");
 }
@@ -8902,20 +9124,6 @@ static void cspv_emit_hlsl(cspv_ctx* ctx)
 		if (d->kind == CSPV_D_GLOBAL && d->init) {
 			cspv_hlsl_validate_expr(ctx, d->init, true);
 		}
-	}
-
-	// Struct types referenced by storage buffers use std430-padded layouts.
-	CK_DYNA cspv_type** buffer_structs = NULL;
-	for (int i = 0; i < (int)asize(ctx->decls); i++) {
-		cspv_decl* d = ctx->decls + i;
-		if (d->kind != CSPV_D_BLOCK || !d->is_buffer) continue;
-		cspv_type* elem = d->member_types[0]->elem;
-		if (elem->kind != CSPV_T_STRUCT) continue;
-		bool seen = false;
-		for (int j = 0; j < (int)asize(buffer_structs); j++) {
-			if (buffer_structs[j] == elem) { seen = true; break; }
-		}
-		if (!seen) apush(buffer_structs, elem);
 	}
 
 	cspv_tp gg;
@@ -8996,12 +9204,8 @@ static void cspv_emit_hlsl(cspv_ctx* ctx)
 		cspv_decl* d = ctx->decls + i;
 		switch (d->kind) {
 		case CSPV_D_STRUCT: {
-			bool buffer_layout = false;
-			for (int j = 0; j < (int)asize(buffer_structs); j++) {
-				if (buffer_structs[j] == d->type) { buffer_layout = true; break; }
-			}
 			spush(ctx->tp_out, '\n');
-			cspv_hlsl_struct(g, d->type, buffer_layout);
+			cspv_hlsl_struct(g, d->type);
 			cspv_tp_struct_factory(g, d->type);
 			break;
 		}
@@ -9025,17 +9229,9 @@ static void cspv_emit_hlsl(cspv_ctx* ctx)
 
 		case CSPV_D_BLOCK:
 			if (d->is_buffer) {
-				cspv_type* elem = d->member_types[0]->elem;
-				const char* elem_name = cspv_hlsl_type_name(elem);
 				// Named instances collapse to one `inst_member` resource (the
 				// member printer rewrites `inst.member` accesses to match).
-				char resname[128];
-				if (d->instance_name) snprintf(resname, sizeof(resname), "%s_%s", d->instance_name, d->member_names[0]);
-				else snprintf(resname, sizeof(resname), "%s", d->member_names[0]);
-				sfmt_append(ctx->tp_out, "%sStructuredBuffer<%s> %s : register(%c%d, space%d);\n",
-					d->readonly ? "" : "RW", elem_name, resname,
-					d->readonly ? 't' : 'u', d->binding, d->set);
-				sfmt_append(ctx->tp_out, "uint %s_len() { uint c, s; %s.GetDimensions(c, s); return c; }\n", resname, resname);
+				cspv_hlsl_buffer_decl(g, d);
 			} else {
 				// std140 offsets -> explicit packoffsets (HLSL cbuffer packing
 				// diverges from std140 for vec3-after-scalar and similar cases).
@@ -9169,7 +9365,6 @@ static void cspv_emit_hlsl(cspv_ctx* ctx)
 			"}\n");
 	}
 
-	afree(buffer_structs);
 	afree(gg.rename_from);
 	afree(gg.rename_to);
 	afree(gg.shadows);
