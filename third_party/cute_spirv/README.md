@@ -46,6 +46,17 @@ go to cute_framework, and each with a fixture in `test/gfx/`:
   `metal::gradient2d`/`cube`/`3d`, so a local or parameter of the same name
   (`float level`) no longer hides them and breaks the MSL
   (`gfx_texture_bias`).
+* `demote;` in fragment shaders (GL_EXT_demote_to_helper_invocation): the
+  invocation becomes a helper that keeps running for its quad's
+  derivatives. SPIR-V `OpDemoteToHelperInvocation` with the
+  `DemoteToHelperInvocation` capability and the
+  `SPV_EXT_demote_to_helper_invocation` extension, HLSL `discard`, MSL
+  `discard_fragment()` (demote semantics from MSL 2.3), WGSL `discard`; a
+  compile error for GLSL ES 3.00. `demote` followed by anything but `;` is
+  still a name. Vulkan needs the device feature
+  `shaderDemoteToHelperInvocation`, which the compiler's built-in gfx does
+  not request, so its pixel fixture is `gfx_demote` in goose_gfx;
+  `gfx_shader_sources` here checks that it compiles.
 
 To update, copy both files from a newer cute_framework commit, record that
 commit here, and apply the local changes above that it does not have.
