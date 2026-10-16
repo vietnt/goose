@@ -481,6 +481,7 @@ enum
 	CSpvOpImage                = 100,
 	CSpvOpImageQuerySizeLod    = 103,
 	CSpvOpImageQuerySize       = 104,
+	CSpvOpImageQueryLod        = 105,
 	CSpvOpConvertFToU          = 109,
 	CSpvOpConvertFToS          = 110,
 	CSpvOpConvertSToF          = 111,
@@ -3962,6 +3963,7 @@ typedef enum cspv_intrin_kind
 	CSPV_INTRIN_TEXEL_FETCH,  // texelFetch(sampler, ivec2, lod)
 	CSPV_INTRIN_TEXTURE_SIZE, // textureSize(sampler, lod) -> ivec2
 	CSPV_INTRIN_TEXTURE_GATHER, // textureGather(sampler, uv[, comp]) -> vec4
+	CSPV_INTRIN_TEXTURE_QUERY_LOD, // textureQueryLod(sampler, uv) -> vec2
 	CSPV_INTRIN_RELATIONAL,   // lessThan & friends: (vecN, vecN) -> bvecN.
 	CSPV_INTRIN_BOOL_REDUCE,  // all/any: bvecN -> bool.
 	CSPV_INTRIN_BOOL_NOT,     // not(bvecN) -> bvecN.
@@ -4060,6 +4062,7 @@ static void cspv_init_intrins(void)
 	cspv_add_intrin("texelFetch", CSPV_INTRIN_TEXEL_FETCH, 0, 3);
 	cspv_add_intrin("textureSize", CSPV_INTRIN_TEXTURE_SIZE, 0, 2);
 	cspv_add_intrin("textureGather", CSPV_INTRIN_TEXTURE_GATHER, 0, -2);
+	cspv_add_intrin("textureQueryLod", CSPV_INTRIN_TEXTURE_QUERY_LOD, 0, 2);
 	cspv_add_intrin_full("lessThan", CSPV_INTRIN_RELATIONAL, CSpvOpFOrdLessThan, CSpvOpSLessThan, CSpvOpULessThan, 2, 0);
 	cspv_add_intrin_full("lessThanEqual", CSPV_INTRIN_RELATIONAL, CSpvOpFOrdLessThanEqual, CSpvOpSLessThanEqual, CSpvOpULessThanEqual, 2, 0);
 	cspv_add_intrin_full("greaterThan", CSPV_INTRIN_RELATIONAL, CSpvOpFOrdGreaterThan, CSpvOpSGreaterThan, CSpvOpUGreaterThan, 2, 0);
@@ -4142,7 +4145,7 @@ static cspv_value cspv_gen_intrin(cspv_ctx* ctx, cspv_expr* e, cspv_intrin* in)
 	if (in->kind == CSPV_INTRIN_TEXTURE || in->kind == CSPV_INTRIN_TEXTURE_OFFSET ||
 	    in->kind == CSPV_INTRIN_TEXTURE_LOD || in->kind == CSPV_INTRIN_TEXTURE_GRAD ||
 	    in->kind == CSPV_INTRIN_TEXEL_FETCH || in->kind == CSPV_INTRIN_TEXTURE_SIZE ||
-	    in->kind == CSPV_INTRIN_TEXTURE_GATHER) {
+	    in->kind == CSPV_INTRIN_TEXTURE_GATHER || in->kind == CSPV_INTRIN_TEXTURE_QUERY_LOD) {
 		cspv_type* st = NULL;
 		uint32_t sampler = cspv_gen_rvalue(ctx, e->u.call.args[0], &st);
 		if (st->kind != CSPV_T_SAMPLER2D) cspv_errorf(ctx, e->line, "'%s' requires a sampler type", e->u.call.name);
@@ -4192,6 +4195,29 @@ static cspv_value cspv_gen_intrin(cspv_ctx* ctx, cspv_expr* e, cspv_intrin* in)
 				ctx->es_unsupported_line = e->line;
 			}
 			return cspv_rvalue(vec4_t, result);
+		}
+
+		if (in->kind == CSPV_INTRIN_TEXTURE_QUERY_LOD) {
+			// textureQueryLod(sampler, P): x is the mip level sampling at P would use,
+			// clamped to the texture's levels; y is the level of detail before that clamp,
+			// relative to the base level. P spans the sampled dims, an array's layer left
+			// out. It needs implicit derivatives, so fragment shaders only.
+			if (ctx->stage != CSPV_STAGE_FRAGMENT) {
+				cspv_errorf(ctx, e->line, "textureQueryLod is only available in fragment shaders");
+			}
+			if (shadow) {
+				cspv_errorf(ctx, e->line, "textureQueryLod is not supported with %s", cspv_type_name(st));
+			}
+			cspv_type* lod_coord_t = (sdim == CSPV_SDIM_CUBE || sdim == CSPV_SDIM_3D) ? ctx->t_vec[1] : ctx->t_vec[0];
+			uint32_t coord = cspv_gen_rvalue_as(ctx, e->u.call.args[1], lod_coord_t);
+			uint32_t result = cspv_new_id(ctx);
+			cspv_emit4(&ctx->body, CSpvOpImageQueryLod, cspv_type_id(ctx, ctx->t_vec[0]), result, sampler, coord);
+			ctx->needs_image_query = true;
+			if (!ctx->es_unsupported) {
+				ctx->es_unsupported = "textureQueryLod";
+				ctx->es_unsupported_line = e->line;
+			}
+			return cspv_rvalue(ctx->t_vec[0], result);
 		}
 
 		if (in->kind == CSPV_INTRIN_TEXTURE) {
@@ -8430,6 +8456,14 @@ static void cspv_hlsl_call(cspv_tp* g, cspv_expr* e)
 			sappend(*out, hwide ? ").w)" : ").z)");
 			return;
 		}
+		if (!strcmp(name, "textureQueryLod")) {
+			sfmt_append(*out, "float2(%s_tex.CalculateLevelOfDetail(%s_smp, ", s, s);
+			cspv_tp_expr(g, args[1], 2);
+			sfmt_append(*out, "), %s_tex.CalculateLevelOfDetailUnclamped(%s_smp, ", s, s);
+			cspv_tp_expr(g, args[1], 2);
+			sappend(*out, "))");
+			return;
+		}
 		if (!strcmp(name, "textureGather")) {
 			static const char* gather[4] = { "GatherRed", "GatherGreen", "GatherBlue", "GatherAlpha" };
 			int comp = argc == 3 ? (int)args[2]->u.ival : 0;
@@ -9260,6 +9294,14 @@ static void cspv_msl_call(cspv_tp* g, cspv_expr* e)
 			sappend(*out, mcube ? ").w" : ").z");
 			if (no_gradients) sappend(*out, ", level(0)");
 			spush(*out, ')');
+			return;
+		}
+		if (!strcmp(name, "textureQueryLod")) {
+			sfmt_append(*out, "float2(%s_tex.calculate_clamped_lod(%s_smp, ", s, s);
+			cspv_tp_expr(g, args[1], 2);
+			sfmt_append(*out, "), %s_tex.calculate_unclamped_lod(%s_smp, ", s, s);
+			cspv_tp_expr(g, args[1], 2);
+			sappend(*out, "))");
 			return;
 		}
 		if (!strcmp(name, "textureGather")) {
@@ -11354,6 +11396,9 @@ static void cspv_wg_texture(cspv_wg* g, cspv_expr* e)
 		}
 		spush(*out, ')');
 		return;
+	}
+	if (!strcmp(name, "textureQueryLod")) {
+		cspv_errorf(ctx, e->line, "textureQueryLod is not supported in WGSL output (WGSL has no level-of-detail query)");
 	}
 	if (!strcmp(name, "textureGather")) {
 		sfmt_append(*out, "textureGather(%d, %s, %s, ", (int)(asize(args) == 3 ? args[2]->u.ival : 0), tex, smp);
