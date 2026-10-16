@@ -1577,8 +1577,24 @@ def main():
             r.fail("compile-shader probe_badset.frag", out + err)
         else:
             r.ok("compile-shader probe_badset.frag")
+    # Unused globals leave nothing in the SPIR-V: two shaders that differ
+    # only in their names compile to SPIR-V of one size.
+    def shader_unused_globals():
+        sizes = []
+        for name in ("probe_unused_short.frag", "probe_unused_long.frag"):
+            code, out, err = r.goose("--compile-shader", HERE / "gfx" / name)
+            m = re.search(r"SPIR-V (\d+)", out)
+            if code != 0 or not m:
+                r.fail(f"compile-shader {name}", out + err)
+                return
+            sizes.append(int(m.group(1)))
+        if sizes[0] != sizes[1]:
+            r.fail("compile-shader unused globals", f"SPIR-V sizes {sizes[0]} and {sizes[1]}")
+        else:
+            r.ok("compile-shader unused globals")
     r.show_task(shader_probe)
     r.show_task(shader_badset)
+    r.show_task(shader_unused_globals)
 
     # An error in shader source written in the program is reported at its own
     # line of the program: the one using `oops` in these fixtures.

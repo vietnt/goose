@@ -961,6 +961,12 @@ typedef struct cspv_symbol
 	// Constant scalars (const globals): folded value for constant expressions.
 	bool has_const_value;
 	uint32_t const_bits;
+	// A Private global's OpVariable is emitted at its first reference, so a
+	// module declares only the globals it uses: AMD's Vulkan driver crashes
+	// creating a pipeline whose two stages each declare an unused Private
+	// variable of the same name, as a shared include's consts do.
+	bool pending_var;
+	uint32_t pending_init; // Its initializer's constant id, or 0.
 	// Functions:
 	CK_DYNA cspv_type** params;
 	CK_DYNA int* param_quals; // 0 = in, 1 = out, 2 = inout.
@@ -3752,6 +3758,16 @@ static cspv_value cspv_gen_ref(cspv_ctx* ctx, cspv_expr* e)
 	memset(&v, 0, sizeof(v));
 	switch (sym->kind) {
 	case CSPV_SYM_VAR:
+		if (sym->pending_var) {
+			uint32_t ptr_tid = cspv_ptr_type_id(ctx, sym->type, CSpvStoragePrivate);
+			if (sym->pending_init) {
+				cspv_emit4(&ctx->globals, CSpvOpVariable, ptr_tid, sym->id, CSpvStoragePrivate, sym->pending_init);
+			} else {
+				cspv_emit3(&ctx->globals, CSpvOpVariable, ptr_tid, sym->id, CSpvStoragePrivate);
+			}
+			cspv_name_id(ctx, sym->id, sym->name);
+			sym->pending_var = false;
+		}
 		v.kind = CSPV_V_PTR;
 		v.type = sym->type;
 		v.id = sym->id;
@@ -6184,17 +6200,12 @@ static void cspv_gen_global_var(cspv_ctx* ctx, bool is_const, cspv_type* type, c
 	}
 	cspv_expect_punct(ctx, ';');
 
-	uint32_t ptr_tid = cspv_ptr_type_id(ctx, type, CSpvStoragePrivate);
 	uint32_t var = cspv_new_id(ctx);
-	if (init_id) {
-		cspv_emit4(&ctx->globals, CSpvOpVariable, ptr_tid, var, CSpvStoragePrivate, init_id);
-	} else {
-		cspv_emit3(&ctx->globals, CSpvOpVariable, ptr_tid, var, CSpvStoragePrivate);
-	}
-	cspv_name_id(ctx, var, name);
 	cspv_symbol* sym = cspv_add_symbol(ctx, name, CSPV_SYM_VAR, type, var, CSpvStoragePrivate, line);
 	sym->has_const_value = folded;
 	sym->const_bits = folded_bits;
+	sym->pending_var = true;
+	sym->pending_init = init_id;
 
 	cspv_decl* d = cspv_record_decl(ctx, CSPV_D_GLOBAL, line);
 	d->type = type;
