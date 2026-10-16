@@ -1059,6 +1059,7 @@ typedef struct cspv_ctx
 	uint32_t gl_pervertex_var;
 	uint32_t frag_depth_var; // Nonzero once the shader references gl_FragDepth.
 	uint32_t front_facing_var; // Nonzero once the shader reads gl_FrontFacing.
+	uint32_t sample_id_var; // Nonzero once the shader reads gl_SampleID (which shades per sample).
 
 	// Reflection, built up during global declaration codegen. Ownership transfers
 	// to CSPV_Result on success.
@@ -2509,6 +2510,7 @@ typedef struct cspv_keywords
 	const char* kw_gl_FragCoord;
 	const char* kw_gl_FragDepth;
 	const char* kw_gl_FrontFacing;
+	const char* kw_gl_SampleID;
 	const char* kw_struct;
 	const char* kw_length;
 	const char* kw_buffer;
@@ -2569,6 +2571,7 @@ static void cspv_init_keywords(void)
 	g_cspv_kw.kw_gl_FragCoord = sintern("gl_FragCoord");
 	g_cspv_kw.kw_gl_FragDepth = sintern("gl_FragDepth");
 	g_cspv_kw.kw_gl_FrontFacing = sintern("gl_FrontFacing");
+	g_cspv_kw.kw_gl_SampleID = sintern("gl_SampleID");
 	g_cspv_kw.kw_struct = sintern("struct");
 	g_cspv_kw.kw_length = sintern("length");
 	g_cspv_kw.kw_buffer = sintern("buffer");
@@ -3685,9 +3688,9 @@ static cspv_value cspv_gen_member(cspv_ctx* ctx, cspv_expr* e)
 //--------------------------------------------------------------------------------------------------
 // References.
 
-// Fragment builtins past gl_FragCoord (gl_FragDepth, gl_FrontFacing) are declared on first
-// use, so a shader that never touches one carries no such interface variable (and, for
-// gl_FragDepth, no DepthReplacing). The first use can sit inside a helper or a branch, so the
+// Fragment builtins past gl_FragCoord (gl_FragDepth, gl_FrontFacing, gl_SampleID) are declared
+// on first use, so a shader that never touches one carries no such interface variable (and, for
+// gl_FragDepth, no DepthReplacing; for gl_SampleID, no per-sample shading). The first use can sit inside a helper or a branch, so the
 // symbol goes in the global scope where every later function sees the same variable.
 static cspv_symbol* cspv_declare_frag_builtin(cspv_ctx* ctx, const char* name, cspv_type* type, int storage, int builtin, uint32_t* var_out)
 {
@@ -3718,6 +3721,9 @@ static cspv_value cspv_gen_ref(cspv_ctx* ctx, cspv_expr* e)
 			sym = cspv_declare_frag_builtin(ctx, e->u.name, ctx->t_float, CSpvStorageOutput, 22, &ctx->frag_depth_var); // BuiltIn FragDepth
 		} else if (e->u.name == g_cspv_kw.kw_gl_FrontFacing) {
 			sym = cspv_declare_frag_builtin(ctx, e->u.name, ctx->t_bool, CSpvStorageInput, 17, &ctx->front_facing_var); // BuiltIn FrontFacing
+		} else if (e->u.name == g_cspv_kw.kw_gl_SampleID) {
+			sym = cspv_declare_frag_builtin(ctx, e->u.name, ctx->t_int, CSpvStorageInput, 18, &ctx->sample_id_var); // BuiltIn SampleId
+			cspv_emit2(&ctx->decos, CSpvOpDecorate, ctx->sample_id_var, CSpvDecorationFlat);
 		}
 	}
 	if (!sym) cspv_errorf(ctx, e->line, "undeclared identifier '%s'", e->u.name);
@@ -7963,6 +7969,7 @@ static void cspv_emit_glsl300(cspv_ctx* ctx)
 	// (std430 words in a 1024-wide RGBA32UI texture), images through same-named samplers.
 	bool cs = ctx->stage == CSPV_STAGE_COMPUTE;
 	if (cs) cspv_es_cs_validate(ctx);
+	if (ctx->sample_id_var) cspv_errorf(ctx, 0, "gl_SampleID is not supported in GLSL ES 3.00 output");
 	for (int i = 0; i < (int)asize(ctx->decls) && !cs; i++) {
 		cspv_decl* d = ctx->decls + i;
 		if (d->kind == CSPV_D_BLOCK && d->is_buffer) {
@@ -8838,6 +8845,7 @@ static void cspv_emit_hlsl(cspv_ctx* ctx)
 		sappend(ctx->tp_out, "static float4 gl_FragCoord;\n");
 		if (ctx->frag_depth_var) sappend(ctx->tp_out, "static float gl_FragDepth;\n");
 		if (ctx->front_facing_var) sappend(ctx->tp_out, "static bool gl_FrontFacing;\n");
+		if (ctx->sample_id_var) sappend(ctx->tp_out, "static int gl_SampleID;\n");
 	} else {
 		sappend(ctx->tp_out,
 			"static uint3 gl_GlobalInvocationID;\nstatic uint3 gl_LocalInvocationID;\n"
@@ -8975,6 +8983,7 @@ static void cspv_emit_hlsl(cspv_ctx* ctx)
 	} else if (ctx->stage == CSPV_STAGE_FRAGMENT) {
 		sappend(ctx->tp_out, "\nstruct cf_ps_in\n{\n\tfloat4 cf_position : SV_Position;\n");
 		if (ctx->front_facing_var) sappend(ctx->tp_out, "\tbool cf_front_facing : SV_IsFrontFace;\n");
+		if (ctx->sample_id_var) sappend(ctx->tp_out, "\tuint cf_sample_id : SV_SampleIndex;\n");
 		for (int i = 0; i < (int)asize(ctx->decls); i++) {
 			cspv_decl* d = ctx->decls + i;
 			if (d->kind != CSPV_D_INOUT || !d->is_input) continue;
@@ -8994,6 +9003,7 @@ static void cspv_emit_hlsl(cspv_ctx* ctx)
 		}
 		sappend(ctx->tp_out, "};\ncf_ps_out main(cf_ps_in cf_in)\n{\n\tgl_FragCoord = cf_in.cf_position;\n");
 		if (ctx->front_facing_var) sappend(ctx->tp_out, "\tgl_FrontFacing = cf_in.cf_front_facing;\n");
+		if (ctx->sample_id_var) sappend(ctx->tp_out, "\tgl_SampleID = (int)cf_in.cf_sample_id;\n");
 		for (int i = 0; i < (int)asize(ctx->decls); i++) {
 			cspv_decl* d = ctx->decls + i;
 			if (d->kind != CSPV_D_INOUT || !d->is_input) continue;
@@ -9722,6 +9732,7 @@ static void cspv_emit_msl(cspv_ctx* ctx)
 		sappend(ctx->tp_out, "\tfloat4 gl_FragCoord;\n");
 		if (ctx->frag_depth_var) sappend(ctx->tp_out, "\tfloat gl_FragDepth;\n");
 		if (ctx->front_facing_var) sappend(ctx->tp_out, "\tbool gl_FrontFacing;\n");
+		if (ctx->sample_id_var) sappend(ctx->tp_out, "\tint gl_SampleID;\n");
 	} else {
 		sappend(ctx->tp_out, "\tuint3 gl_GlobalInvocationID;\n\tuint3 gl_LocalInvocationID;\n\tuint3 gl_WorkGroupID;\n\tuint gl_LocalInvocationIndex;\n");
 	}
@@ -9784,6 +9795,7 @@ static void cspv_emit_msl(cspv_ctx* ctx)
 	} else if (ctx->stage == CSPV_STAGE_FRAGMENT) {
 		sappend(ctx->tp_out, "\nfragment cf_ps_out main0(cf_ps_in cf_in [[stage_in]]");
 		if (ctx->front_facing_var) sappend(ctx->tp_out, ", bool cf_front_facing [[front_facing]]");
+		if (ctx->sample_id_var) sappend(ctx->tp_out, ", uint cf_sample_id [[sample_id]]");
 	} else {
 		sappend(ctx->tp_out,
 			"\nkernel void main0(uint3 cf_gtid [[thread_position_in_threadgroup]], uint3 cf_dtid [[thread_position_in_grid]], "
@@ -9863,6 +9875,7 @@ static void cspv_emit_msl(cspv_ctx* ctx)
 	} else if (ctx->stage == CSPV_STAGE_FRAGMENT) {
 		sappend(ctx->tp_out, "\ts.gl_FragCoord = cf_in.cf_position;\n");
 		if (ctx->front_facing_var) sappend(ctx->tp_out, "\ts.gl_FrontFacing = cf_front_facing;\n");
+		if (ctx->sample_id_var) sappend(ctx->tp_out, "\ts.gl_SampleID = int(cf_sample_id);\n");
 		for (int i = 0; i < (int)asize(ctx->decls); i++) {
 			cspv_decl* d = ctx->decls + i;
 			if (d->kind == CSPV_D_INOUT && d->is_input) sfmt_append(ctx->tp_out, "\ts.%s = cf_in.%s;\n", d->name, d->name);
@@ -13090,6 +13103,7 @@ static void cspv_emit_wgsl(cspv_ctx* ctx)
 		if (cspv_wg_used(g, "gl_FragCoord")) sappend(*out, "var<private> gl_FragCoord: vec4f;\n");
 		if (ctx->frag_depth_var) sappend(*out, "var<private> gl_FragDepth: f32;\n");
 		if (ctx->front_facing_var) sappend(*out, "var<private> gl_FrontFacing: bool;\n");
+		if (ctx->sample_id_var) sappend(*out, "var<private> gl_SampleID: i32;\n");
 	} else {
 		if (cspv_wg_used(g, "gl_GlobalInvocationID")) sappend(*out, "var<private> gl_GlobalInvocationID: vec3u;\n");
 		if (cspv_wg_used(g, "gl_LocalInvocationID")) sappend(*out, "var<private> gl_LocalInvocationID: vec3u;\n");
@@ -13159,6 +13173,7 @@ static void cspv_emit_wgsl(cspv_ctx* ctx)
 	} else if (stage == CSPV_STAGE_FRAGMENT) {
 		sappend(*out, "\nstruct cspv_fs_in\n{\n\t@builtin(position) cspv_frag_coord: vec4f,\n");
 		if (ctx->front_facing_var) sappend(*out, "\t@builtin(front_facing) cspv_front_facing: bool,\n");
+		if (ctx->sample_id_var) sappend(*out, "\t@builtin(sample_index) cspv_sample_index: u32,\n");
 		for (int i = 0; i < (int)asize(ctx->decls); i++) {
 			cspv_decl* d = ctx->decls + i;
 			if (d->kind == CSPV_D_INOUT && d->is_input) {
@@ -13178,6 +13193,7 @@ static void cspv_emit_wgsl(cspv_ctx* ctx)
 		sfmt_append(*out, "\n@fragment\nfn main(cspv_in: cspv_fs_in)%s\n{\n", has_out ? " -> cspv_fs_out" : "");
 		if (cspv_wg_used(g, "gl_FragCoord")) sappend(*out, "\tgl_FragCoord = cspv_in.cspv_frag_coord;\n");
 		if (ctx->front_facing_var) sappend(*out, "\tgl_FrontFacing = cspv_in.cspv_front_facing;\n");
+		if (ctx->sample_id_var) sappend(*out, "\tgl_SampleID = i32(cspv_in.cspv_sample_index);\n");
 		for (int i = 0; i < (int)asize(ctx->decls); i++) {
 			cspv_decl* d = ctx->decls + i;
 			if (d->kind == CSPV_D_INOUT && d->is_input) sfmt_append(*out, "\t%s = cspv_in.%s;\n", cspv_wg_id(g, d->name), cspv_wg_id(g, d->name));
@@ -13380,6 +13396,7 @@ static uint32_t* cspv_assemble(cspv_ctx* ctx, size_t* out_word_count)
 	// OpCapability Shader.
 	cspv_emit1(&mod, CSpvOpCapability, 1);
 	if (ctx->needs_image_query) cspv_emit1(&mod, CSpvOpCapability, 50); // ImageQuery
+	if (ctx->sample_id_var) cspv_emit1(&mod, CSpvOpCapability, 35); // SampleRateShading
 	if (ctx->needs_extended_formats) cspv_emit1(&mod, CSpvOpCapability, 49); // StorageImageExtendedFormats
 
 	// OpExtInstImport %glsl "GLSL.std.450".
