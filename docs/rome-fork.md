@@ -10,6 +10,14 @@ This fork carries the compiler changes the Rome port needs on top of
 - `master` is an exact mirror of upstream `master`. Nothing is committed to
   it; it only moves to upstream's head.
 
+The blessed gfx package (`gfx`, `audio`, `ui` in `src/blessed.txt`) is
+[vietnt/goose_gfx](https://github.com/vietnt/goose_gfx) at a tag of its own,
+`v1-rome.<n>`, cut from its `rome` branch (which builds on
+[vietnt/SDL](https://github.com/vietnt/SDL)'s `rome-3.4`), so a release
+compiles that fork in. The fetch is shallow, so the ref must be a tag or
+branch, not a commit hash. To move it: tag goose_gfx, change the three rows,
+and run the goose_gfx suite as below.
+
 ## Syncing with upstream
 
 ```sh
