@@ -1,0 +1,10 @@
+true
+true true
+sizes: 300000 0 -1 -1
+start: true 0,7,14,21
+middle: true, bytes wrong 0, first 109
+up to the last byte: true, bytes wrong 0
+past the end: false false
+before the start: false
+a directory: false, a missing file: false
+true true true
