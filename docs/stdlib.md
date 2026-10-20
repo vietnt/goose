@@ -567,6 +567,8 @@ fn write_file(path: const u8[:], data: const u8[:]) -> bool
 fn write_file_atomic(path: const u8[:], data: const u8[:]) -> bool   // the old file or all of the new
 fn append_file(path: const u8[:], data: const u8[:]) -> bool
 fn file_exists(path: const u8[:]) -> bool                  // a file, not a directory
+fn file_size(path: const u8[:]) -> i64                     // bytes; -1 if not a file
+fn read_file_at(path: const u8[:], offset: i64, out: u8[:]) -> bool  // all of out, from offset
 fn delete_file(path: const u8[:]) -> bool
 fn rename_file(from: const u8[:], to: const u8[:]) -> bool // replaces `to` atomically
 fn make_dir(path: const u8[:]) -> bool                     // true if one is there afterwards

@@ -18,6 +18,9 @@ extern fn write_file(path: const u8[:], data: const u8[:]) -> bool = "gs_os_writ
 extern fn write_file_atomic(path: const u8[:], data: const u8[:]) -> bool = "gs_os_write_file_atomic";
 extern fn append_file(path: const u8[:], data: const u8[:]) -> bool = "gs_os_append_file";
 extern fn file_exists(path: const u8[:]) -> bool = "gs_os_file_exists";    // a file, not a directory
+extern fn file_size(path: const u8[:]) -> i64 = "gs_os_file_size";          // bytes; -1 if not a file
+// Fills all of `out` from byte `offset` on: false if the file ends first.
+extern fn read_file_at(path: const u8[:], offset: i64, out: u8[:]) -> bool = "gs_os_read_file_at";
 extern fn delete_file(path: const u8[:]) -> bool = "gs_os_remove_file";
 // Replaces `to`, if there is one, in a single step.
 extern fn rename_file(from: const u8[:], to: const u8[:]) -> bool = "gs_os_rename_file";

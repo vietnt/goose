@@ -170,6 +170,39 @@ GS_API uint8_t gs_os_file_exists(sl_u8 path) {
     return gs_os_native(path, p) >= 0 && gs_os_kind(p) == 1;
 }
 
+GS_API int64_t gs_os_file_size(sl_u8 path) {
+    gs_os_char p[GS_OS_PATH_MAX];
+    if (gs_os_native(path, p) < 0) return -1;
+#ifdef _WIN32
+    WIN32_FILE_ATTRIBUTE_DATA d;
+    if (!GetFileAttributesExW(p, GetFileExInfoStandard, &d) || (d.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+        return -1;
+    return (int64_t)(((uint64_t)d.nFileSizeHigh << 32) | d.nFileSizeLow);
+#else
+    struct stat st;
+    if (stat(p, &st) != 0 || S_ISDIR(st.st_mode)) return -1;
+    return (int64_t)st.st_size;
+#endif
+}
+
+/* All of `out` from byte `offset` of the file on: false where the file
+   ends first. The seek is 64-bit everywhere. */
+GS_API uint8_t gs_os_read_file_at(sl_u8 path, int64_t offset, sl_u8 out) {
+    gs_os_char p[GS_OS_PATH_MAX];
+    if (offset < 0 || gs_os_native(path, p) < 0 || gs_os_kind(p) != 1) return 0;
+    FILE *f = gs_os_fopen(p, "rb");
+    if (!f) return 0;
+#ifdef _WIN32
+    int sought = _fseeki64(f, offset, SEEK_SET) == 0;
+#else
+    int sought = fseeko(f, (off_t)offset, SEEK_SET) == 0;
+#endif
+    size_t n = (size_t)(out.len < 0 ? 0 : out.len);
+    int ok = sought && fread(out.data, 1, n, f) == n;
+    fclose(f);
+    return ok ? 1 : 0;
+}
+
 GS_API uint8_t gs_os_remove_file(sl_u8 path) {
     gs_os_char p[GS_OS_PATH_MAX];
     if (gs_os_native(path, p) < 0) return 0;

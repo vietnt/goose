@@ -169,6 +169,8 @@ GS_API uint8_t gs_os_write_file(sl_u8 path, sl_u8 data);
 GS_API uint8_t gs_os_write_file_atomic(sl_u8 path, sl_u8 data);
 GS_API uint8_t gs_os_append_file(sl_u8 path, sl_u8 data);
 GS_API uint8_t gs_os_file_exists(sl_u8 path);
+GS_API int64_t gs_os_file_size(sl_u8 path);
+GS_API uint8_t gs_os_read_file_at(sl_u8 path, int64_t offset, sl_u8 out);
 GS_API uint8_t gs_os_remove_file(sl_u8 path);
 GS_API uint8_t gs_os_rename_file(sl_u8 from, sl_u8 to);
 GS_API uint8_t gs_os_make_dir(sl_u8 path);

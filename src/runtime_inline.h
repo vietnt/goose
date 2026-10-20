@@ -3604,6 +3604,8 @@ GS_API uint8_t gs_os_write_file(sl_u8 path, sl_u8 data);
 GS_API uint8_t gs_os_write_file_atomic(sl_u8 path, sl_u8 data);
 GS_API uint8_t gs_os_append_file(sl_u8 path, sl_u8 data);
 GS_API uint8_t gs_os_file_exists(sl_u8 path);
+GS_API int64_t gs_os_file_size(sl_u8 path);
+GS_API uint8_t gs_os_read_file_at(sl_u8 path, int64_t offset, sl_u8 out);
 GS_API uint8_t gs_os_remove_file(sl_u8 path);
 GS_API uint8_t gs_os_rename_file(sl_u8 from, sl_u8 to);
 GS_API uint8_t gs_os_make_dir(sl_u8 path);
@@ -3625,9 +3627,9 @@ GS_API void gs_os_sleep_ms(int64_t ms);
 GS_API uint64_t gs_os_random_u64(void);
 /* os.trim_memory: discards unused complete pages of this thread program's
    data stacks. Defined with the region registry it walks (runtime_impl.h),
-   but declared here like the other os primitives, so that no prototype is
 )GSRT"
-R"GSRT(   emitted for it. For generated code only, whose callers write back their
+R"GSRT(   but declared here like the other os primitives, so that no prototype is
+   emitted for it. For generated code only, whose callers write back their
    cached tops first; C called from Goose must not call it. 0 means an OS
    request failed; a top outside its region panics. */
 GS_API uint8_t gs_trim_memory(void);
@@ -3806,6 +3808,39 @@ GS_API uint8_t gs_os_file_exists(sl_u8 path) {
     return gs_os_native(path, p) >= 0 && gs_os_kind(p) == 1;
 }
 
+GS_API int64_t gs_os_file_size(sl_u8 path) {
+    gs_os_char p[GS_OS_PATH_MAX];
+    if (gs_os_native(path, p) < 0) return -1;
+#ifdef _WIN32
+    WIN32_FILE_ATTRIBUTE_DATA d;
+    if (!GetFileAttributesExW(p, GetFileExInfoStandard, &d) || (d.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+        return -1;
+    return (int64_t)(((uint64_t)d.nFileSizeHigh << 32) | d.nFileSizeLow);
+#else
+    struct stat st;
+    if (stat(p, &st) != 0 || S_ISDIR(st.st_mode)) return -1;
+    return (int64_t)st.st_size;
+#endif
+}
+
+/* All of `out` from byte `offset` of the file on: false where the file
+   ends first. The seek is 64-bit everywhere. */
+GS_API uint8_t gs_os_read_file_at(sl_u8 path, int64_t offset, sl_u8 out) {
+    gs_os_char p[GS_OS_PATH_MAX];
+    if (offset < 0 || gs_os_native(path, p) < 0 || gs_os_kind(p) != 1) return 0;
+    FILE *f = gs_os_fopen(p, "rb");
+    if (!f) return 0;
+#ifdef _WIN32
+    int sought = _fseeki64(f, offset, SEEK_SET) == 0;
+#else
+    int sought = fseeko(f, (off_t)offset, SEEK_SET) == 0;
+#endif
+    size_t n = (size_t)(out.len < 0 ? 0 : out.len);
+    int ok = sought && fread(out.data, 1, n, f) == n;
+    fclose(f);
+    return ok ? 1 : 0;
+}
+
 GS_API uint8_t gs_os_remove_file(sl_u8 path) {
     gs_os_char p[GS_OS_PATH_MAX];
     if (gs_os_native(path, p) < 0) return 0;
@@ -3833,7 +3868,8 @@ GS_API uint8_t gs_os_rename_file(sl_u8 from, sl_u8 to) {
 
 /* Writes data to a new file beside path, flushes it to the disk and renames
    it over path, so that path holds either its old contents or all of the
-   new ones whatever happens meanwhile; on a failure the new file is removed.
+)GSRT"
+R"GSRT(   new ones whatever happens meanwhile; on a failure the new file is removed.
    Its name is path's with a random tag and ".tmp" added, created only if
    nothing has that name already: one that does belongs to someone else, and
    another tag is drawn. */
@@ -3862,8 +3898,7 @@ GS_API uint8_t gs_os_write_file_atomic(sl_u8 path, sl_u8 data) {
             return 0;
         }
         while (ok && left > 0) {
-)GSRT"
-R"GSRT(            DWORD chunk = left > (1 << 30) ? (DWORD)1 << 30 : (DWORD)left, wrote = 0;
+            DWORD chunk = left > (1 << 30) ? (DWORD)1 << 30 : (DWORD)left, wrote = 0;
             ok = WriteFile(h, d, chunk, &wrote, NULL) && wrote == chunk;
             d += chunk;
             left -= chunk;
@@ -4079,7 +4114,8 @@ GS_API int64_t gs_os_arg_count(void) { return gs_argc; }
 
 /* The application's resource directory (resource_dir(), below) in native
    form with its final separator, NUL-terminated in buf (GS_OS_PATH_MAX
-   characters): its length, or 0 where it is not known. JIT supplies its
+)GSRT"
+R"GSRT(   characters): its length, or 0 where it is not known. JIT supplies its
    entry source directory; AOT discovers the running executable. */
 static int gs_os_resource_native(gs_os_char *buf) {
 #ifdef GS_JIT_RESOURCE_DIR
@@ -4107,8 +4143,7 @@ static int gs_os_resource_native(gs_os_char *buf) {
         free(resolved);
     #elif defined(__linux__)
         ssize_t count = readlink("/proc/self/exe", path, (size_t)GS_OS_PATH_MAX);
-)GSRT"
-R"GSRT(        if (count <= 0 || (size_t)count >= (size_t)GS_OS_PATH_MAX) return 0;
+        if (count <= 0 || (size_t)count >= (size_t)GS_OS_PATH_MAX) return 0;
         n = (size_t)count;
     #else
         return 0;
@@ -4289,7 +4324,8 @@ GS_API uint8_t gs_os_getenv(sl_u8 name, gs_rref out) {
     /* Zero is also the length of an empty value. */
     int ok = (len > 0 || GetLastError() != ERROR_ENVVAR_NOT_FOUND) &&
              gs_os_append_wide(out, v, (int)len);
-    if (v != small) free(v);
+)GSRT"
+R"GSRT(    if (v != small) free(v);
     return ok ? 1 : 0;
 #else
     const char *v = getenv(nm);
@@ -4326,8 +4362,7 @@ GS_API int64_t gs_os_clock_ns(void) {
     QueryPerformanceCounter(&c);
     return (int64_t)((double)c.QuadPart * (1000000000.0 / (double)f.QuadPart));
 #else
-)GSRT"
-R"GSRT(    struct timespec ts;
+    struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
 #endif
