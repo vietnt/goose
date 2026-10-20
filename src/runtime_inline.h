@@ -3047,6 +3047,8 @@ GS_API uint8_t gs_os_write_file(sl_u8 path, sl_u8 data);
 GS_API uint8_t gs_os_write_file_atomic(sl_u8 path, sl_u8 data);
 GS_API uint8_t gs_os_append_file(sl_u8 path, sl_u8 data);
 GS_API uint8_t gs_os_file_exists(sl_u8 path);
+GS_API int64_t gs_os_file_size(sl_u8 path);
+GS_API uint8_t gs_os_read_file_at(sl_u8 path, int64_t offset, sl_u8 out);
 GS_API uint8_t gs_os_remove_file(sl_u8 path);
 GS_API uint8_t gs_os_rename_file(sl_u8 from, sl_u8 to);
 GS_API uint8_t gs_os_make_dir(sl_u8 path);
@@ -3232,6 +3234,39 @@ GS_API uint8_t gs_os_file_exists(sl_u8 path) {
     return gs_os_native(path, p) >= 0 && gs_os_kind(p) == 1;
 }
 
+GS_API int64_t gs_os_file_size(sl_u8 path) {
+    gs_os_char p[GS_OS_PATH_MAX];
+    if (gs_os_native(path, p) < 0) return -1;
+#ifdef _WIN32
+    WIN32_FILE_ATTRIBUTE_DATA d;
+    if (!GetFileAttributesExW(p, GetFileExInfoStandard, &d) || (d.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+        return -1;
+    return (int64_t)(((uint64_t)d.nFileSizeHigh << 32) | d.nFileSizeLow);
+#else
+    struct stat st;
+    if (stat(p, &st) != 0 || S_ISDIR(st.st_mode)) return -1;
+    return (int64_t)st.st_size;
+#endif
+}
+
+/* All of `out` from byte `offset` of the file on: false where the file
+   ends first. The seek is 64-bit everywhere. */
+GS_API uint8_t gs_os_read_file_at(sl_u8 path, int64_t offset, sl_u8 out) {
+    gs_os_char p[GS_OS_PATH_MAX];
+    if (offset < 0 || gs_os_native(path, p) < 0 || gs_os_kind(p) != 1) return 0;
+    FILE *f = gs_os_fopen(p, "rb");
+    if (!f) return 0;
+#ifdef _WIN32
+    int sought = _fseeki64(f, offset, SEEK_SET) == 0;
+#else
+    int sought = fseeko(f, (off_t)offset, SEEK_SET) == 0;
+#endif
+    size_t n = (size_t)(out.len < 0 ? 0 : out.len);
+    int ok = sought && fread(out.data, 1, n, f) == n;
+    fclose(f);
+    return ok ? 1 : 0;
+}
+
 GS_API uint8_t gs_os_remove_file(sl_u8 path) {
     gs_os_char p[GS_OS_PATH_MAX];
     if (gs_os_native(path, p) < 0) return 0;
@@ -3263,7 +3298,8 @@ GS_API uint8_t gs_os_rename_file(sl_u8 from, sl_u8 to) {
    Its name is path's with a random tag and ".tmp" added, created only if
    nothing has that name already: one that does belongs to someone else, and
    another tag is drawn. */
-GS_API uint8_t gs_os_write_file_atomic(sl_u8 path, sl_u8 data) {
+)GSRT"
+R"GSRT(GS_API uint8_t gs_os_write_file_atomic(sl_u8 path, sl_u8 data) {
     gs_os_char p[GS_OS_PATH_MAX], t[GS_OS_PATH_MAX + 21];
     int n = gs_os_native(path, p);
     if (n <= 0) return 0;
@@ -3293,8 +3329,7 @@ GS_API uint8_t gs_os_write_file_atomic(sl_u8 path, sl_u8 data) {
             d += chunk;
             left -= chunk;
         }
-)GSRT"
-R"GSRT(        ok = ok && FlushFileBuffers(h);
+        ok = ok && FlushFileBuffers(h);
         if (!CloseHandle(h)) ok = 0;
         ok = ok && gs_os_replace(t, p);
         if (!ok) DeleteFileW(t);
@@ -3515,7 +3550,8 @@ GS_API uint8_t gs_os_resource_dir(gs_rref out) {
     char path[GS_OS_PATH_MAX];
     size_t n;
     #ifdef __APPLE__
-        uint32_t capacity = sizeof path;
+)GSRT"
+R"GSRT(        uint32_t capacity = sizeof path;
         if (_NSGetExecutablePath(path, &capacity) != 0) return 0;
         /* Resolve the loader's possible relative path and symlinks. */
         char *resolved = realpath(path, NULL);
@@ -3542,8 +3578,7 @@ GS_API uint8_t gs_os_resource_dir(gs_rref out) {
             memcpy(path + n, "Resources/", sizeof "Resources/" - 1);
             n += sizeof "Resources/" - 1;
         }
-)GSRT"
-R"GSRT(    #endif
+    #endif
     gs_bld_append(out, path, (int64_t)n);
     return 1;
 #endif
