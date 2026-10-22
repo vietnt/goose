@@ -3,7 +3,10 @@ repository this runner makes, declared by its file:// URL at a tag and at a
 commit, fetched into GOOSE_HOME (which run_tests.py points under build/),
 fetched again by `goose fetch --update` after the tag moved, and a library
 requiring the package at another ref than the root declares. Concurrent
-fetches share a cold cache, including a submodule and an abandoned checkout."""
+fetches share a cold cache, including a submodule and an abandoned checkout.
+A CMake package from a branch is built again after `--update` brings a
+commit that changes only its C."""
+import json
 import os
 import shutil
 import subprocess
@@ -37,7 +40,8 @@ def check_git_packages(exe, base, *, jit):
     base = (Path(base) / "git-packages").resolve()
     rmtree(base)
     # What an earlier run left in the cache, so that this one fetches.
-    for cached in (Path(home) / "pkg").glob("gitpkg-*"):
+    for cached in [*(Path(home) / "pkg").glob("gitpkg-*"), *(Path(home) / "pkg").glob("gitc-*"),
+                   *(Path(home) / "build" / "pkg").glob("gitc-*")]:
         rmtree(cached)
     work = base / "work"
     work.mkdir(parents=True)
@@ -183,4 +187,49 @@ def check_git_packages(exe, base, *, jit):
     if "updating the package gitpkg" not in err:
         raise RuntimeError(f"goose fetch --update did not report the update:\n{out}{err}")
     expect(use_tag, "6")
+
+    # A CMake package from a branch: its C sources are CMake's, so only the
+    # checkout's commit tells its build that --update brought new C. The
+    # commit adds no extern fn, which would rebuild it for another reason.
+    info = json.loads(goose("toolchain", "--json")[0])
+    if not info.get("cmake"):
+        return "no cmake, for the CMake package from a branch"
+    cwork = base / "cwork"
+    cwork.mkdir()
+    tc.write_text(cwork / "CMakeLists.txt",
+                  "cmake_minimum_required(VERSION 3.20)\nproject(gitc C)\n"
+                  "add_library(gitc STATIC gitc.c)\n")
+    tc.write_text(cwork / "gitc.goose", "namespace gitc;\nextern fn gitc_value() -> i64;\n"
+                                        "fn code() -> i64 { gitc_value() }\n")
+    tc.write_text(cwork / "gitc.build", 'cmake_target = "gitc";\n')
+
+    def c_value(v):
+        tc.write_text(cwork / "gitc.c", "#include <stdint.h>\n"
+                                        f"int64_t gitc_value(void) {{ return {v}; }}\n")
+
+    c_value(7)
+    run_git("init", "-q", "-b", "main", ".", cwd=cwork)
+    run_git("add", ".", cwd=cwork)
+    run_git("commit", "-q", "-m", "seven", cwd=cwork)
+    cbare = base / "gitc.git"
+    run_git("clone", "-q", "--bare", str(cwork), str(cbare))
+    curl = "file:///" + cbare.as_posix().lstrip("/")
+    use_c = program("use_c", [f'import gitc from "{curl}@main";',
+                              "fn main() { print(gitc::code()); }"])
+    app = base / ("use_c" + tc.EXE_SUFFIX)
+
+    def expect_c(want):
+        if jit:
+            expect(use_c, want)
+        goose("build", "-o", app, use_c)
+        r = subprocess.run([str(app)], capture_output=True, timeout=60)
+        if tc.decode(r.stdout).strip() != want:
+            raise RuntimeError(f"use_c built printed {tc.decode(r.stdout)!r}, not {want!r}")
+
+    expect_c("7")
+    c_value(8)
+    run_git("commit", "-q", "-am", "eight", cwd=cwork)
+    run_git("push", "-q", str(cbare), "main", cwd=cwork)
+    goose("fetch", "--update", use_c)
+    expect_c("8")
     return None
