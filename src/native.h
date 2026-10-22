@@ -432,6 +432,35 @@ inline string FilesHash(const vector<string> &paths) {
     return Hex8(s);
 }
 
+// The commit a git source's checkout is at, read from its .git (no git run):
+// a detached HEAD names it, a branch HEAD names a ref, loose or packed. ""
+// when there is none, as for a path.
+inline string CheckoutCommit(const string &cachekey) {
+    if (cachekey.empty()) return "";
+    auto git = cat(GooseHome(), "/pkg/", cachekey, "/.git");
+    auto trim = [](string t) {
+        while (!t.empty() && isspace((unsigned char)t.back())) t.pop_back();
+        return t;
+    };
+    string head;
+    LoadFile(cat(git, "/HEAD"), head);
+    head = trim(head);
+    if (head.rfind("ref: ", 0) != 0) return head;
+    auto ref = head.substr(5);
+    string loose;
+    if (LoadFile(cat(git, "/", ref), loose) && !trim(loose).empty()) return trim(loose);
+    string packed;
+    LoadFile(cat(git, "/packed-refs"), packed);
+    for (size_t at = 0; at < packed.size();) {
+        auto end = packed.find('\n', at);
+        auto line = packed.substr(at, end == string::npos ? string::npos : end - at);
+        at = end == string::npos ? packed.size() : end + 1;
+        auto sp = line.find(' ');
+        if (sp != string::npos && trim(line.substr(sp + 1)) == ref) return line.substr(0, sp);
+    }
+    return head;
+}
+
 inline string ReadStamp(const string &path) {
     string s;
     LoadFile(path, s);
@@ -480,14 +509,19 @@ inline bool BuildNativePart(const Ast &ast, int pkg, const string &rootfile,
     string externtext;
     for (auto &n : externs) Append(externtext, n, "\n");
     // The stamp: what the build was made from, then whether it holds the
-    // JIT library besides everything an AOT build has.
+    // JIT library besides everything an AOT build has. A branch's checkout
+    // moves under `goose fetch --update`, its C with it, and a CMake
+    // package's C sources are CMake's, not in `inputs`: the commit stands
+    // for them.
     auto made = cat(b.tc.id, "\n", FilesHash(inputs), "\n", Hex8(sidecartext), "\n",
-                    Hex8(externtext), "\n", Hex8(GooseHeader()), "\n");
+                    Hex8(externtext), "\n", Hex8(GooseHeader()), "\n",
+                    CheckoutCommit(p.cachekey), "\n");
     auto aotstamp = cat(made, "aot\n"), jitstamp = cat(made, "jit\n");
     auto stampfile = cat(dir, "/stamp");
     // Whether the build there serves this one. A CMake package from a path
     // is handed to CMake every time, whose own build is incremental and
-    // sees the sources this stamp does not; a checkout never changes.
+    // sees the sources this stamp does not; a checkout's sources change
+    // only with its commit, which the stamp names.
     auto serves = [&](const string &have) {
         if (!p.cmake_target.empty() && p.cachekey.empty()) return false;
         return (have == jitstamp || (!wantjit && have == aotstamp)) && PathExists(out.rsp) &&
