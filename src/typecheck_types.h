@@ -1132,8 +1132,10 @@ inline bool TypeCheck::MayHoldValueOf(TypeExpr *t, TypeExpr *of) {
 }
 
 // Whether a and b may be one type up to qualifiers and storage forms: of
-// one kind, the same struct or enum, integers of one width (a varint loads
-// as any), floats of one width, arrays of one kind of such elements.
+// one kind, the same struct or enum, a generic struct's with arguments that
+// may be one type pairwise (one not yet known may be any), integers of one
+// width (a varint loads as any), floats of one width, arrays of one kind of
+// such elements.
 inline bool TypeCheck::MaySameType(TypeExpr *a, TypeExpr *b) {
     auto adt = [](TypeExpr *x) { return x->kind == TY_ENUM || x->kind == TY_VARIANT; };
     if (adt(a) || adt(b))
@@ -1141,7 +1143,15 @@ inline bool TypeCheck::MaySameType(TypeExpr *a, TypeExpr *b) {
                (a->kind != TY_ENUM || b->kind != TY_ENUM || a->enu->en == b->enu->en);
     if (a->kind != b->kind) return false;
     switch (a->kind) {
-        case TY_STRUCT: return a->struc->st == b->struc->st;
+        case TY_STRUCT: {
+            if (a->struc->st != b->struc->st) return false;
+            auto &x = a->struc->args, &y = b->struc->args;
+            if (x.size() != y.size()) return true;
+            for (size_t i = 0; i < x.size(); i++)
+                if (!HasGenerics(x[i]) && !HasGenerics(y[i]) && !MaySameType(x[i], y[i]))
+                    return false;
+            return true;
+        }
         case TY_INT:
             return a->intstorage == b->intstorage || a->intstorage == IS_VARINT ||
                    b->intstorage == IS_VARINT;
