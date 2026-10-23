@@ -929,8 +929,12 @@ reference per pointee, the receiver as a reference to the array or a view of
 its elements, a location as the slot alone), and `LaterOperands` names the
 operands not yet evaluated, and, inside the condition of an `if`, the
 scrutinee of a `match` or the sequence of a `for`, the parts it leads to
-(`AfterHead`; `UsedAfter`, §3.10). A `for`'s sequence is the one operand
-held over a construct's parts, while its body is checked
+(`AfterHead`; `UsedAfter`, §3.10). The reference and slice types `HoldAs`
+gives held values are made once per pointee and operand (`HeldRefTo`,
+`HeldSliceOf`): a call's shrinks walk the path again for every array they
+may free, and the Ast keeps every type node until the compile ends. A
+`for`'s sequence is the one operand held over a construct's parts, while
+its body is checked
 (`HoldForSequence`, §6.5): codegen spells the path to it into the loop
 (`ForLoop::CgStmt`, `GenLoc`), so each reference or slice the path loads
 out of a field or element (a `Dot` or `Index` of such a type, `&` of a path

@@ -393,6 +393,18 @@ inline void TypeCheck::Ascend(Node *n) {
     if (e.idx >= 0 && !cur.nodepath.empty()) cur.nodepath.back().pos = e.idx + 1;
 }
 
+inline TypeExpr *TypeCheck::HeldRefTo(TypeExpr *sub, Node *n) {
+    auto &t = heldrefs[{ sub, n }];
+    if (!t) t = ast.RefTo(sub, n->line);
+    return t;
+}
+
+inline TypeExpr *TypeCheck::HeldSliceOf(TypeExpr *elem, Node *n) {
+    auto &t = heldslices[{ elem, n }];
+    if (!t) t = ast.SliceOf(elem, n->line);
+    return t;
+}
+
 // What the operand n of `parent`, whose value is v, holds live: its value
 // where it is a reference or slice; an array's elements where the parent
 // views them (HK_VIEW), or indexes or slices them (HK_ELEMS, the elements the
@@ -418,7 +430,7 @@ void TypeCheck::HoldAs(Node *n, const Val &v, HoldKind kind, Node *parent, const
                              : d.type->kind == TY_SLICE ? d.type->sub : nullptr;
             if (!elem) return;
             if (IsTemp(d.Root())) d.Set(d.Root(), true);
-            d.type = ast.SliceOf(elem, n->line);
+            d.type = HeldSliceOf(elem, n);
             hold(d, false, true);
             return;
         }
@@ -431,9 +443,9 @@ void TypeCheck::HoldAs(Node *n, const Val &v, HoldKind kind, Node *parent, const
             auto elems = c->builtin == B_TO_BYTES || rt->kind == TY_SLICE;
             if (elems) {
                 if (!elem) return;
-                held.type = ast.SliceOf(elem, n->line);
+                held.type = HeldSliceOf(elem, n);
             } else if (held.type->kind != TY_REF) {
-                held.type = ast.RefTo(rt, n->line);
+                held.type = HeldRefTo(rt, n);
             }
             if (IsTemp(held.Root()) && t->kind != TY_REF && t->kind != TY_SLICE)
                 held.Set(held.Root(), true);
@@ -455,7 +467,7 @@ void TypeCheck::HoldAs(Node *n, const Val &v, HoldKind kind, Node *parent, const
     }
     if (kind == HK_VIEW && t->kind == TY_ARRAY && ClassOf(t) != SC_FIXED) {
         auto view = v;
-        view.type = ast.SliceOf(t->arr->sub, n->line);
+        view.type = HeldSliceOf(t->arr->sub, n);
         hold(view, false, true);
     }
     if (HoldsPlainRef(t)) {
@@ -464,7 +476,7 @@ void TypeCheck::HoldAs(Node *n, const Val &v, HoldKind kind, Node *parent, const
         auto held = v;
         held.TakeAlts(ContentsOf(v));
         for (auto pt : pointees) {
-            held.type = ast.RefTo(pt, n->line);
+            held.type = HeldRefTo(pt, n);
             hold(held);
         }
     }
@@ -504,7 +516,7 @@ template<typename F> void TypeCheck::HoldForSequence(ForLoop *fl, const Val &v, 
         if (st->kind != TY_ARRAY) {
             hold(fl->iter, seq, false);
         } else if (ClassOf(st) != SC_RESIZABLE) {
-            seq.type = ast.SliceOf(st->arr->sub, fl->iter->line);
+            seq.type = HeldSliceOf(st->arr->sub, fl->iter);
             hold(fl->iter, seq, false);
         }
     }
@@ -518,7 +530,7 @@ template<typename F> void TypeCheck::HoldForSequence(ForLoop *fl, const Val &v, 
         if (n->exprtype && IsRefOrSlice(n->exprtype) && ov) {
             auto slot = DecayRef(*ov);
             slot.byteview = false;
-            slot.type = ast.SliceOf(LoadType(n->exprtype), n->line);
+            slot.type = HeldSliceOf(LoadType(n->exprtype), n);
             hold(n, slot, true);
         }
         n = unwrap(obj);
@@ -548,12 +560,12 @@ template<typename F> void TypeCheck::HeldOperands(F f) {
                 HoldAs(ch, *cv, HK_VIEW, e.node, cur.rendering, f);
                 if (ch == cur.renderwhere) {
                     auto where = *cv;
-                    where.type = ast.RefTo(where.type, ch->line);
+                    where.type = HeldRefTo(where.type, ch);
                     f(Held { ch, std::move(where), false, cur.rendering });
                 }
                 for (auto &w : cur.renderwalks) {
                     auto walked = w;
-                    walked.type = ast.RefTo(w.type, ch->line);
+                    walked.type = HeldRefTo(w.type, ch);
                     f(Held { .node = ch, .v = std::move(walked), .render = cur.rendering,
                              .inplace = true });
                 }

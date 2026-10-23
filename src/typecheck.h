@@ -439,6 +439,13 @@ struct TypeCheck {
         // shrink leaves in place, but its parts as the walk read them.
         bool inplace = false;
     };
+    // The reference and slice types a held value is given, one node per
+    // pointee and operand: a call's shrinks scan the held values once for
+    // every array they may free, and the Ast keeps each node it makes until
+    // the compile ends.
+    flat_map<pair<TypeExpr *, Node *>, TypeExpr *> heldrefs, heldslices;
+    TypeExpr *HeldRefTo(TypeExpr *sub, Node *n);
+    TypeExpr *HeldSliceOf(TypeExpr *elem, Node *n);
     template<typename F> void HoldAs(Node *n, const Val &v, HoldKind kind, Node *parent,
                                      const char *render, F f);
     template<typename F> void HoldForSequence(ForLoop *fl, const Val &v, F f);
